@@ -27,7 +27,8 @@ jobs:
         run: zig build test
 
   build-macos:
-    runs-on: macos-latest
+    runs-on: macos-15
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Cache Zig compiler

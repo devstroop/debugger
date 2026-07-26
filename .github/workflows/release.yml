@@ -31,7 +31,7 @@ jobs:
             artifact: debugger-linux-x86_64
             archive: tar.gz
           - name: macOS (arm64)
-            runner: macos-latest
+            runner: macos-15
             artifact: debugger-macos-arm64
             archive: tar.gz
 
