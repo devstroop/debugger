@@ -1,6 +1,6 @@
 const std = @import("std");
 const json = std.json;
-const log_mod = @import("../Logger.zig");
+const log_mod = @import("../logger.zig");
 
 pub fn Server(comptime Ctx: type) type {
     return struct {
@@ -135,7 +135,7 @@ pub fn Server(comptime Ctx: type) type {
             try writeJsonString(w, "protocolVersion"); try w.writeByte(':');
             try writeJsonString(w, protocol_version); try w.writeByte(',');
             try w.writeAll("\"capabilities\":{\"tools\":{\"listChanged\":true}},");
-            try w.writeAll("\"serverInfo\":{\"name\":\"debugger-mcp\",\"version\":\"0.1.0\"},");
+            try w.writeAll("\"serverInfo\":{\"name\":\"debugger\",\"version\":\"0.1.0\"},");
             try w.writeAll("\"instructions\":\"Debug MCP server\"");
             try w.writeAll("},\"jsonrpc\":\"2.0\",\"id\":");
             try writeId(w, id);

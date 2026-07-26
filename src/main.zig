@@ -1,12 +1,12 @@
 const std = @import("std");
 const mcp_server = @import("mcp/server.zig");
 const handler_mod = @import("mcp/handler.zig");
-const log_mod = @import("Logger.zig");
+const log_mod = @import("logger.zig");
 
 pub fn main() !void {
     // Write startup marker to stderr so opencode can confirm the binary launched
     const stderr_file = std.fs.File.stderr();
-    stderr_file.writeAll("debugger-mcp: starting\n") catch {};
+    stderr_file.writeAll("debugger: starting\n") catch {};
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
