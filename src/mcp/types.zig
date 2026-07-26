@@ -9,11 +9,11 @@ pub const SessionState = struct {
     threadId: i64 = 0,
 };
 
-pub fn textContent(text: []const u8) json.Value {
+pub fn text_content(text: []const u8) json.Value {
     return json.Value{ .string = text };
 }
 
-fn buildTextContent(allocator: std.mem.Allocator, text: []const u8) !json.Value {
+fn build_text_content(allocator: std.mem.Allocator, text: []const u8) !json.Value {
     const owned = try allocator.dupe(u8, text);
     var arr = json.Array.init(allocator);
     var item = json.ObjectMap.init(allocator);
@@ -23,7 +23,7 @@ fn buildTextContent(allocator: std.mem.Allocator, text: []const u8) !json.Value 
     return json.Value{ .array = arr };
 }
 
-fn addStateToResult(result: *json.ObjectMap, state: ?SessionState) !void {
+fn add_state_to_result(result: *json.ObjectMap, state: ?SessionState) !void {
     const s = state orelse return;
     try result.put("sessionActive", json.Value{ .bool = s.active });
     try result.put("stopped", json.Value{ .bool = s.stopped });
@@ -35,24 +35,24 @@ fn addStateToResult(result: *json.ObjectMap, state: ?SessionState) !void {
     }
 }
 
-pub fn textResult(allocator: std.mem.Allocator, text: []const u8) !json.Value {
+pub fn text_result(allocator: std.mem.Allocator, text: []const u8) !json.Value {
     var result = json.ObjectMap.init(allocator);
-    try result.put("content", try buildTextContent(allocator, text));
+    try result.put("content", try build_text_content(allocator, text));
     try result.put("isError", json.Value{ .bool = false });
     return json.Value{ .object = result };
 }
 
-pub fn textResultWithState(allocator: std.mem.Allocator, text: []const u8, state: ?SessionState) !json.Value {
+pub fn text_result_with_state(allocator: std.mem.Allocator, text: []const u8, state: ?SessionState) !json.Value {
     var result = json.ObjectMap.init(allocator);
-    try result.put("content", try buildTextContent(allocator, text));
+    try result.put("content", try build_text_content(allocator, text));
     try result.put("isError", json.Value{ .bool = false });
-    try addStateToResult(&result, state);
+    try add_state_to_result(&result, state);
     return json.Value{ .object = result };
 }
 
-pub fn errorResult(allocator: std.mem.Allocator, message: []const u8) !json.Value {
+pub fn error_result(allocator: std.mem.Allocator, message: []const u8) !json.Value {
     var result = json.ObjectMap.init(allocator);
-    try result.put("content", try buildTextContent(allocator, message));
+    try result.put("content", try build_text_content(allocator, message));
     try result.put("isError", json.Value{ .bool = true });
     return json.Value{ .object = result };
 }

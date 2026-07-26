@@ -2,7 +2,7 @@ const std = @import("std");
 const json = std.json;
 pub const types = @import("types.zig");
 
-pub fn stoppedInfoToJson(info: types.StoppedInfo, allocator: std.mem.Allocator) !json.Value {
+pub fn stopped_info_to_json(info: types.StoppedInfo, allocator: std.mem.Allocator) !json.Value {
     var obj = json.ObjectMap.init(allocator);
     try obj.put("reason", json.Value{ .string = try allocator.dupe(u8, info.reason) });
     try obj.put("threadId", json.Value{ .integer = info.thread_id });
@@ -12,7 +12,7 @@ pub fn stoppedInfoToJson(info: types.StoppedInfo, allocator: std.mem.Allocator) 
     return json.Value{ .object = obj };
 }
 
-pub fn findPortForPid(pid: u32) !u16 {
+pub fn find_port_for_pid(pid: u32) !u16 {
     const allocator = std.heap.page_allocator;
     const result = std.process.Child.run(.{
         .allocator = allocator,
@@ -46,7 +46,7 @@ pub fn findPortForPid(pid: u32) !u16 {
     return error.PortNotFound;
 }
 
-pub fn writeJsonString(w: anytype, s: []const u8) !void {
+pub fn write_json_string(w: anytype, s: []const u8) !void {
     for (s) |c| {
         switch (c) {
             '"' => try w.writeAll("\\\""),
@@ -63,13 +63,13 @@ pub fn writeJsonString(w: anytype, s: []const u8) !void {
     }
 }
 
-pub fn checkSuccess(response: json.Value) !void {
+pub fn check_success(response: json.Value) !void {
     if (response.object.get("success")) |s| {
         if (!s.bool) return error.DapRequestFailed;
     }
 }
 
-pub fn jsonToI64(val: json.Value) i64 {
+pub fn json_to_i64(val: json.Value) i64 {
     return switch (val) {
         .integer => |n| n,
         .float => |f| @intFromFloat(f),

@@ -7,11 +7,11 @@ const util = @import("util.zig");
 
 const DapBreakpoint = types.DapBreakpoint;
 const Error = types.Error;
-const writeJsonString = util.writeJsonString;
-const checkSuccess = util.checkSuccess;
-const jsonToI64 = util.jsonToI64;
-const findPortForPid = util.findPortForPid;
-const stoppedInfoToJson = util.stoppedInfoToJson;
+const write_json_string = util.write_json_string;
+const check_success = util.check_success;
+const json_to_i64 = util.json_to_i64;
+const find_port_for_pid = util.find_port_for_pid;
+const stopped_info_to_json = util.stopped_info_to_json;
 
 const dap_timeout_ms: u64 = 15_000;
 const poll_ms: u64 = 300;
@@ -63,7 +63,7 @@ pub const DapClient = struct {
 
         self.logger.fmt(.info, "Spawned pid={}, discovering port...", .{pid});
 
-        const port = self.discoverPort(pid) catch |err| {
+        const port = self.discover_port(pid) catch |err| {
             _ = child.kill() catch unreachable;
             self.proc = null;
             return err;
@@ -93,7 +93,7 @@ pub const DapClient = struct {
 
     pub fn initialize(self: *DapClient) !void {
         const resp = try self.send("initialize", "{\"clientID\":\"debugger\",\"adapterID\":\"lldb\"}");
-        try checkSuccess(resp);
+        try check_success(resp);
         self.logger.info("DAP initialized");
     }
 
@@ -102,26 +102,26 @@ pub const DapClient = struct {
         defer args.deinit(self.allocator);
         var w = args.writer(self.allocator);
         try w.writeAll("{\"program\":\"");
-        try writeJsonString(w, program);
+        try write_json_string(w, program);
         try w.writeAll("\",\"cwd\":\"");
-        try writeJsonString(w, cwd);
+        try write_json_string(w, cwd);
         try w.writeAll("\",\"type\":\"lldb\",\"request\":\"launch\",\"stopOnEntry\":false}");
 
         const seq = self.seq;
         self.seq += 1;
         self.launch_seq = seq;
-        try self.writeFrame("launch", seq, args.items);
+        try self.write_frame("launch", seq, args.items);
 
         const start = std.time.milliTimestamp();
         while (true) {
             const elapsed = @as(u64, @intCast(std.time.milliTimestamp() - start));
             if (elapsed > dap_timeout_ms) return error.Timeout;
 
-            if (self.tryParseMessage()) |msg| {
+            if (self.try_parse_message()) |msg| {
                 const root = msg.object;
                 if (root.get("request_seq")) |rs_val| {
-                    if (self.launch_seq != 0 and jsonToI64(rs_val) == self.launch_seq) {
-                        try checkSuccess(msg);
+                    if (self.launch_seq != 0 and json_to_i64(rs_val) == self.launch_seq) {
+                        try check_success(msg);
                         self.launch_seq = 0;
                     }
                 }
@@ -136,7 +136,7 @@ pub const DapClient = struct {
                     }
                 }
             } else |err| switch (err) {
-                error.NeedMoreData => self.readMore() catch |read_err| {
+                error.NeedMoreData => self.read_more() catch |read_err| {
                     if (read_err == error.Timeout) continue;
                     return read_err;
                 },
@@ -145,13 +145,13 @@ pub const DapClient = struct {
         }
     }
 
-    pub fn setBreakpoints(self: *DapClient, file_path: []const u8, breakpoints: []const DapBreakpoint) !json.Value {
+    pub fn set_breakpoints(self: *DapClient, file_path: []const u8, breakpoints: []const DapBreakpoint) !json.Value {
         var args = std.ArrayList(u8){};
         defer args.deinit(self.allocator);
         var w = args.writer(self.allocator);
 
         try w.writeAll("{\"source\":{\"path\":\"");
-        try writeJsonString(w, file_path);
+        try write_json_string(w, file_path);
         try w.writeAll("\"},\"breakpoints\":[");
         for (breakpoints, 0..) |bp, i| {
             if (i > 0) try w.writeByte(',');
@@ -159,12 +159,12 @@ pub const DapClient = struct {
             try w.print("{}", .{bp.line});
             if (bp.condition) |c| {
                 try w.writeAll(",\"condition\":\"");
-                try writeJsonString(w, c);
+                try write_json_string(w, c);
                 try w.writeAll("\"");
             }
             if (bp.log_message) |lm| {
                 try w.writeAll(",\"logMessage\":\"");
-                try writeJsonString(w, lm);
+                try write_json_string(w, lm);
                 try w.writeAll("\"");
             }
             try w.writeAll("}");
@@ -173,7 +173,7 @@ pub const DapClient = struct {
         return self.send("setBreakpoints", args.items);
     }
 
-    pub fn setFunctionBreakpoints(self: *DapClient, names: []const []const u8) !json.Value {
+    pub fn set_function_breakpoints(self: *DapClient, names: []const []const u8) !json.Value {
         var args = std.ArrayList(u8){};
         defer args.deinit(self.allocator);
         var w = args.writer(self.allocator);
@@ -181,22 +181,22 @@ pub const DapClient = struct {
         for (names, 0..) |name, i| {
             if (i > 0) try w.writeByte(',');
             try w.writeAll("{\"name\":\"");
-            try writeJsonString(w, name);
+            try write_json_string(w, name);
             try w.writeAll("\"}");
         }
         try w.writeAll("]}");
         return self.send("setFunctionBreakpoints", args.items);
     }
 
-    pub fn configurationDone(self: *DapClient) !void {
+    pub fn configuration_done(self: *DapClient) !void {
         if (self.started) return;
         const resp = try self.send("configurationDone", "{}");
-        try checkSuccess(resp);
+        try check_success(resp);
         self.started = true;
         self.logger.info("Configuration done, program started");
     }
 
-    fn clearPendingStopped(self: *DapClient) void {
+    fn clear_pending_stopped(self: *DapClient) void {
         if (self.pending_stopped_reason) |r| self.allocator.free(r);
         if (self.pending_stopped_description) |d| self.allocator.free(d);
         self.pending_stopped_reason = null;
@@ -204,70 +204,70 @@ pub const DapClient = struct {
         self.pending_stopped_thread = 0;
     }
 
-    pub fn next(self: *DapClient) !json.Value {
-        self.clearPendingStopped();
-        _ = self.processPendingEvents() catch {};
+    pub fn step_next(self: *DapClient) !json.Value {
+        self.clear_pending_stopped();
+        _ = self.process_pending_events() catch {};
         if (self.thread_id < 0) return error.InvalidThreadId;
         var args = std.ArrayList(u8){};
         defer args.deinit(self.allocator);
         var w = args.writer(self.allocator);
         try w.print("{{\"threadId\":{}}}", .{self.thread_id});
         const resp = try self.send("next", args.items);
-        try checkSuccess(resp);
-        const stopped = try self.waitForStopped();
-        return stoppedInfoToJson(stopped, self.allocator);
+        try check_success(resp);
+        const stopped = try self.wait_for_stopped();
+        return stopped_info_to_json(stopped, self.allocator);
     }
 
-    pub fn stepIn(self: *DapClient) !json.Value {
-        self.clearPendingStopped();
-        _ = self.processPendingEvents() catch {};
+    pub fn step_in(self: *DapClient) !json.Value {
+        self.clear_pending_stopped();
+        _ = self.process_pending_events() catch {};
         if (self.thread_id < 0) return error.InvalidThreadId;
         var args = std.ArrayList(u8){};
         defer args.deinit(self.allocator);
         var w = args.writer(self.allocator);
         try w.print("{{\"threadId\":{}}}", .{self.thread_id});
         const resp = try self.send("stepIn", args.items);
-        try checkSuccess(resp);
-        const stopped = try self.waitForStopped();
-        return stoppedInfoToJson(stopped, self.allocator);
+        try check_success(resp);
+        const stopped = try self.wait_for_stopped();
+        return stopped_info_to_json(stopped, self.allocator);
     }
 
-    pub fn stepOut(self: *DapClient) !json.Value {
-        self.clearPendingStopped();
-        _ = self.processPendingEvents() catch {};
+    pub fn step_out(self: *DapClient) !json.Value {
+        self.clear_pending_stopped();
+        _ = self.process_pending_events() catch {};
         if (self.thread_id < 0) return error.InvalidThreadId;
         var args = std.ArrayList(u8){};
         defer args.deinit(self.allocator);
         var w = args.writer(self.allocator);
         try w.print("{{\"threadId\":{}}}", .{self.thread_id});
         const resp = try self.send("stepOut", args.items);
-        try checkSuccess(resp);
-        const stopped = try self.waitForStopped();
-        return stoppedInfoToJson(stopped, self.allocator);
+        try check_success(resp);
+        const stopped = try self.wait_for_stopped();
+        return stopped_info_to_json(stopped, self.allocator);
     }
 
-    pub fn pause(self: *DapClient) !json.Value {
-        self.clearPendingStopped();
-        _ = self.processPendingEvents() catch {};
+    pub fn pause_exec(self: *DapClient) !json.Value {
+        self.clear_pending_stopped();
+        _ = self.process_pending_events() catch {};
         if (self.thread_id < 0) return error.InvalidThreadId;
         var args = std.ArrayList(u8){};
         defer args.deinit(self.allocator);
         var w = args.writer(self.allocator);
         try w.print("{{\"threadId\":{}}}", .{self.thread_id});
         const resp = try self.send("pause", args.items);
-        try checkSuccess(resp);
-        const stopped = try self.waitForStopped();
-        return stoppedInfoToJson(stopped, self.allocator);
+        try check_success(resp);
+        const stopped = try self.wait_for_stopped();
+        return stopped_info_to_json(stopped, self.allocator);
     }
 
-    pub fn continueExec(self: *DapClient) !json.Value {
-        self.clearPendingStopped();
-        _ = self.processPendingEvents() catch {};
+    pub fn continue_exec(self: *DapClient) !json.Value {
+        self.clear_pending_stopped();
+        _ = self.process_pending_events() catch {};
         if (!self.started) {
-            try self.configurationDone();
+            try self.configuration_done();
             self.started = true;
-            const stopped = try self.waitForStopped();
-            return stoppedInfoToJson(stopped, self.allocator);
+            const stopped = try self.wait_for_stopped();
+            return stopped_info_to_json(stopped, self.allocator);
         }
         if (self.thread_id < 0) return error.InvalidThreadId;
         var args = std.ArrayList(u8){};
@@ -275,14 +275,14 @@ pub const DapClient = struct {
         var w = args.writer(self.allocator);
         try w.print("{{\"threadId\":{}}}", .{self.thread_id});
         const resp = try self.send("continue", args.items);
-        try checkSuccess(resp);
-        const stopped = try self.waitForStopped();
-        return stoppedInfoToJson(stopped, self.allocator);
+        try check_success(resp);
+        const stopped = try self.wait_for_stopped();
+        return stopped_info_to_json(stopped, self.allocator);
     }
 
-    pub fn stackTrace(self: *DapClient, start_frame: i64, levels: i64) !json.Value {
-        self.clearPendingStopped();
-        _ = self.processPendingEvents() catch {};
+    pub fn stack_trace(self: *DapClient, start_frame: i64, levels: i64) !json.Value {
+        self.clear_pending_stopped();
+        _ = self.process_pending_events() catch {};
         if (self.thread_id < 0) return error.InvalidThreadId;
         var args = std.ArrayList(u8){};
         defer args.deinit(self.allocator);
@@ -312,9 +312,9 @@ pub const DapClient = struct {
         defer args.deinit(self.allocator);
         var w = args.writer(self.allocator);
         try w.writeAll("{\"expression\":\"");
-        try writeJsonString(w, expression);
+        try write_json_string(w, expression);
         try w.writeAll("\",\"context\":\"");
-        try writeJsonString(w, context);
+        try write_json_string(w, context);
         try w.writeAll("\"");
         if (frame_id) |fid| {
             try w.writeAll(",\"frameId\":");
@@ -326,18 +326,18 @@ pub const DapClient = struct {
 
     // ── Low-level protocol ────────────────────────────────────────
 
-    fn discoverPort(_: *DapClient, pid: u32) !u16 {
+    fn discover_port(_: *DapClient, pid: u32) !u16 {
         var elapsed: u64 = 0;
         while (elapsed < dap_timeout_ms) {
             std.Thread.sleep(poll_ms * std.time.ns_per_ms);
             elapsed += poll_ms;
-            if (findPortForPid(pid)) |port| return port else |_| continue;
+            if (find_port_for_pid(pid)) |port| return port else |_| continue;
         }
         return error.PortDiscoveryFailed;
     }
 
     pub fn send(self: *DapClient, command: []const u8, args_msg: ?[]const u8) !json.Value {
-        _ = self.processPendingEvents() catch {};
+        _ = self.process_pending_events() catch {};
         const seq = self.seq;
         self.seq += 1;
         const conn = self.conn orelse return error.NotConnected;
@@ -348,7 +348,7 @@ pub const DapClient = struct {
         try bw.writeAll("{\"seq\":");
         try bw.print("{}", .{seq});
         try bw.writeAll(",\"type\":\"request\",\"command\":\"");
-        try writeJsonString(bw, command);
+        try write_json_string(bw, command);
         try bw.writeAll("\"");
         if (args_msg) |a| {
             try bw.writeAll(",\"arguments\":");
@@ -359,13 +359,13 @@ pub const DapClient = struct {
         var frame = std.ArrayList(u8){};
         defer frame.deinit(self.allocator);
         const fw = frame.writer(self.allocator);
-        try writeFrameContent(fw, body.items);
+        try write_frame_content(fw, body.items);
         try conn.writeAll(frame.items);
 
-        return self.readResponse(seq);
+        return self.read_response(seq);
     }
 
-    fn writeFrame(self: *DapClient, command: []const u8, seq: i64, args_msg: ?[]const u8) !void {
+    fn write_frame(self: *DapClient, command: []const u8, seq: i64, args_msg: ?[]const u8) !void {
         const conn = self.conn orelse return error.NotConnected;
         var body = std.ArrayList(u8){};
         defer body.deinit(self.allocator);
@@ -373,7 +373,7 @@ pub const DapClient = struct {
         try bw.writeAll("{\"seq\":");
         try bw.print("{}", .{seq});
         try bw.writeAll(",\"type\":\"request\",\"command\":\"");
-        try writeJsonString(bw, command);
+        try write_json_string(bw, command);
         try bw.writeAll("\"");
         if (args_msg) |a| {
             try bw.writeAll(",\"arguments\":");
@@ -384,42 +384,42 @@ pub const DapClient = struct {
         var frame = std.ArrayList(u8){};
         defer frame.deinit(self.allocator);
         const fw = frame.writer(self.allocator);
-        try writeFrameContent(fw, body.items);
+        try write_frame_content(fw, body.items);
         try conn.writeAll(frame.items);
     }
 
-    fn writeFrameContent(fw: anytype, body: []const u8) !void {
+    fn write_frame_content(fw: anytype, body: []const u8) !void {
         try fw.writeAll("Content-Length: ");
         try fw.print("{}", .{body.len});
         try fw.writeAll("\r\n\r\n");
         try fw.writeAll(body);
     }
 
-    fn readResponse(self: *DapClient, expected_seq: i64) !json.Value {
+    fn read_response(self: *DapClient, expected_seq: i64) !json.Value {
         const start = std.time.milliTimestamp();
         while (true) {
             const elapsed = @as(u64, @intCast(std.time.milliTimestamp() - start));
             if (elapsed > dap_timeout_ms) return error.Timeout;
 
-            if (self.tryParseMessage()) |msg| {
+            if (self.try_parse_message()) |msg| {
                 const root = msg.object;
-                self.captureStoppedThreadId(msg, true);
+                self.capture_stopped_thread_id(msg, true);
 
                 if (root.get("request_seq")) |rs_val| {
-                    const rs = jsonToI64(rs_val);
+                    const rs = json_to_i64(rs_val);
                     if (self.launch_seq != 0 and rs == self.launch_seq) {
-                        try checkSuccess(msg);
+                        try check_success(msg);
                         self.launch_seq = 0;
                     }
                     if (rs == expected_seq) {
-                        try checkSuccess(msg);
+                        try check_success(msg);
                         return msg;
                     }
                 }
             } else |err| switch (err) {
                 error.ProtocolError => return err,
                 error.NeedMoreData => {
-                    self.readMore() catch |read_err| {
+                    self.read_more() catch |read_err| {
                         if (read_err == error.Timeout) continue;
                         return read_err;
                     };
@@ -431,11 +431,11 @@ pub const DapClient = struct {
 
     pub const StoppedInfo = types.StoppedInfo;
 
-    fn waitForStopped(self: *DapClient) !StoppedInfo {
+    fn wait_for_stopped(self: *DapClient) !StoppedInfo {
         if (self.pending_stopped_reason) |reason| {
             const owned_reason = try self.allocator.dupe(u8, reason);
             const owned_desc = if (self.pending_stopped_description) |d| try self.allocator.dupe(u8, d) else null;
-            self.clearPendingStopped();
+            self.clear_pending_stopped();
             return StoppedInfo{
                 .reason = owned_reason,
                 .thread_id = self.pending_stopped_thread,
@@ -448,10 +448,10 @@ pub const DapClient = struct {
         while (true) {
             if (timer.read() > stop_timeout_ns) return error.Timeout;
 
-            const msg = self.tryParseMessage() catch |err| {
+            const msg = self.try_parse_message() catch |err| {
                 if (err == error.NeedMoreData) {
                     const prev_len = self.read_buf.items.len;
-                    self.readMore() catch |read_err| {
+                    self.read_more() catch |read_err| {
                         if (read_err == error.Timeout) {
                             std.Thread.sleep(10 * std.time.ns_per_ms);
                             continue;
@@ -473,7 +473,7 @@ pub const DapClient = struct {
             const root = msg.object;
 
             if (root.get("request_seq") != null) {
-                self.logger.fmt(.warn, "waitForStopped consumed a response, buffer may be out of sync", .{});
+                self.logger.fmt(.warn, "wait_for_stopped consumed a response, buffer may be out of sync", .{});
                 continue;
             }
 
@@ -499,7 +499,7 @@ pub const DapClient = struct {
             if (body_val != .object) return error.ProtocolError;
             const body = body_val.object;
             const tid_val = body.get("threadId") orelse return error.ProtocolError;
-            self.thread_id = jsonToI64(tid_val);
+            self.thread_id = json_to_i64(tid_val);
 
             const reason_val = body.get("reason") orelse return error.ProtocolError;
             if (reason_val != .string) return error.ProtocolError;
@@ -513,8 +513,8 @@ pub const DapClient = struct {
         }
     }
 
-    fn processPendingEvents(self: *DapClient) !void {
-        _ = self.readMore() catch {};
+    fn process_pending_events(self: *DapClient) !void {
+        _ = self.read_more() catch {};
         var keep = std.ArrayList(u8){};
         var temp_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer {
@@ -538,7 +538,7 @@ pub const DapClient = struct {
             if (is_response) {
                 keep.appendSlice(self.allocator, data[0..total]) catch break;
             } else {
-                self.captureStoppedThreadId(parsed, false);
+                self.capture_stopped_thread_id(parsed, false);
             }
             data = data[total..];
         }
@@ -549,7 +549,7 @@ pub const DapClient = struct {
         try self.read_buf.appendSlice(self.allocator, remaining);
     }
 
-    fn captureStoppedThreadId(self: *DapClient, msg: json.Value, set_pending: bool) void {
+    fn capture_stopped_thread_id(self: *DapClient, msg: json.Value, set_pending: bool) void {
         if (msg != .object) return;
         const root = msg.object;
         const msg_type_val = root.get("type") orelse return;
@@ -563,7 +563,7 @@ pub const DapClient = struct {
         {
             self.thread_id = -1;
             if (set_pending) {
-                self.clearPendingStopped();
+                self.clear_pending_stopped();
                 self.pending_stopped_reason = self.allocator.dupe(u8, event_val.string) catch null;
                 self.pending_stopped_description = null;
                 self.pending_stopped_thread = 0;
@@ -576,9 +576,9 @@ pub const DapClient = struct {
         if (body_val != .object) return;
         const body = body_val.object;
         const tid_val = body.get("threadId") orelse return;
-        self.thread_id = jsonToI64(tid_val);
+        self.thread_id = json_to_i64(tid_val);
         if (set_pending) {
-            self.clearPendingStopped();
+            self.clear_pending_stopped();
             if (body.get("reason")) |r_val| {
                 if (r_val == .string) {
                     self.pending_stopped_reason = self.allocator.dupe(u8, r_val.string) catch null;
@@ -594,7 +594,7 @@ pub const DapClient = struct {
         self.logger.fmt(.debug, "Captured thread_id={}", .{self.thread_id});
     }
 
-    fn tryParseMessage(self: *DapClient) !json.Value {
+    fn try_parse_message(self: *DapClient) !json.Value {
         const data = self.read_buf.items;
         const header_end = std.mem.indexOf(u8, data, "\r\n\r\n") orelse return error.NeedMoreData;
         const header = data[0..header_end];
@@ -622,7 +622,7 @@ pub const DapClient = struct {
         return parsed;
     }
 
-    fn readMore(self: *DapClient) !void {
+    fn read_more(self: *DapClient) !void {
         const handle = (self.conn orelse return error.NotConnected).handle;
         var poll_fds = [_]std.posix.pollfd{
             .{ .fd = handle, .events = std.posix.POLL.IN, .revents = 0 },

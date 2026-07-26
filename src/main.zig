@@ -30,21 +30,21 @@ pub fn main() !void {
     defer server.deinit();
 
     // Register tools — each handler is a free function that takes *Handler as first arg
-    try server.registerTool("start_debugging", handler_mod.startDebugging);
-    try server.registerTool("stop_debugging", handler_mod.stopDebugging);
-    try server.registerTool("step_over", handler_mod.stepOver);
-    try server.registerTool("step_into", handler_mod.stepInto);
-    try server.registerTool("step_out", handler_mod.stepOut);
-    try server.registerTool("pause", handler_mod.pause);
-    try server.registerTool("continue_execution", handler_mod.continueExec);
-    try server.registerTool("restart_debugging", handler_mod.restartDebugging);
-    try server.registerTool("add_breakpoint", handler_mod.addBreakpoint);
-    try server.registerTool("add_logpoint", handler_mod.addLogpoint);
-    try server.registerTool("remove_breakpoint", handler_mod.removeBreakpoint);
-    try server.registerTool("clear_all_breakpoints", handler_mod.clearAllBreakpoints);
-    try server.registerTool("list_breakpoints", handler_mod.listBreakpoints);
-    try server.registerTool("get_variables_values", handler_mod.getVariables);
-    try server.registerTool("evaluate_expression", handler_mod.evaluateExpression);
+    try server.registerTool("start_debugging", handler_mod.start_debugging);
+    try server.registerTool("stop_debugging", handler_mod.stop_debugging);
+    try server.registerTool("step_over", handler_mod.step_over);
+    try server.registerTool("step_into", handler_mod.step_into);
+    try server.registerTool("step_out", handler_mod.step_out);
+    try server.registerTool("pause", handler_mod.pause_exec);
+    try server.registerTool("continue_execution", handler_mod.continue_exec);
+    try server.registerTool("restart_debugging", handler_mod.restart_debugging);
+    try server.registerTool("add_breakpoint", handler_mod.add_breakpoint);
+    try server.registerTool("add_logpoint", handler_mod.add_logpoint);
+    try server.registerTool("remove_breakpoint", handler_mod.remove_breakpoint);
+    try server.registerTool("clear_all_breakpoints", handler_mod.clear_all_breakpoints);
+    try server.registerTool("list_breakpoints", handler_mod.list_breakpoints);
+    try server.registerTool("get_variables_values", handler_mod.get_variables);
+    try server.registerTool("evaluate_expression", handler_mod.evaluate_expression);
 
     logger.info("Starting MCP stdio server...");
     try server.run();

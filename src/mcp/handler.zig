@@ -29,14 +29,14 @@ pub const Handler = struct {
         self.breakpoints.deinit(self.allocator);
     }
 
-    fn freeBreakpoint(self: *Handler, bp: Breakpoint) void {
+    fn free_breakpoint(self: *Handler, bp: Breakpoint) void {
         self.allocator.free(bp.file_path);
         if (bp.condition) |c| self.allocator.free(c);
         if (bp.log_message) |lm| self.allocator.free(lm);
     }
 
-    fn freeAllBreakpoints(self: *Handler) void {
-        for (self.breakpoints.items) |bp| self.freeBreakpoint(bp);
+    fn free_all_breakpoints(self: *Handler) void {
+        for (self.breakpoints.items) |bp| self.free_breakpoint(bp);
         self.breakpoints.clearRetainingCapacity();
     }
 
@@ -56,7 +56,7 @@ pub const Handler = struct {
     }
 
     fn stopSession(self: *Handler) void {
-        self.freeAllBreakpoints();
+        self.free_all_breakpoints();
         if (self.client) |c| {
             c.deinit();
             self.allocator.destroy(c);
@@ -72,68 +72,68 @@ pub const Handler = struct {
 // ── Tool handlers ──────────────────────────────────────────────────
 // NOTE: `args` is the tool's `arguments` object (already unwrapped by server).
 
-pub fn startDebugging(ctx: *Handler, allocator: std.mem.Allocator, args: ?json.Value) !json.Value {
+pub fn start_debugging(ctx: *Handler, allocator: std.mem.Allocator, args: ?json.Value) !json.Value {
     ctx.stopSession();
 
-    const a = args orelse return mcp_types.errorResult(allocator, "Missing arguments");
-    const file_path = a.object.get("fileFullPath") orelse return mcp_types.errorResult(allocator, "Missing fileFullPath");
+    const a = args orelse return mcp_types.error_result(allocator, "Missing arguments");
+    const file_path = a.object.get("fileFullPath") orelse return mcp_types.error_result(allocator, "Missing fileFullPath");
     const wd_arg = a.object.get("workingDirectory");
 
     const c = try ctx.ensureSession();
-    const cwd = if (wd_arg) |wd| wd.string else extractDir(file_path.string);
+    const cwd = if (wd_arg) |wd| wd.string else extract_dir(file_path.string);
     try c.launch(file_path.string, cwd);
 
-    return mcp_types.textResultWithState(allocator, "Debug session started", .{
+    return mcp_types.text_result_with_state(allocator, "Debug session started", .{
         .active = true,
         .stopped = false,
     });
 }
 
-pub fn stopDebugging(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Value) !json.Value {
-    if (ctx.client == null) return mcp_types.errorResult(allocator, "No active debug session");
+pub fn stop_debugging(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Value) !json.Value {
+    if (ctx.client == null) return mcp_types.error_result(allocator, "No active debug session");
     ctx.stopSession();
-    return mcp_types.textResultWithState(allocator, "Debug session stopped", .{
+    return mcp_types.text_result_with_state(allocator, "Debug session stopped", .{
         .active = false,
         .stopped = false,
     });
 }
 
-pub fn stepOver(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Value) !json.Value {
+pub fn step_over(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Value) !json.Value {
     const c = try ctx.getClient();
-    if (c.thread_id < 0) return mcp_types.errorResult(allocator, "No stopped thread");
-    const stopped = try c.next();
-    return stoppedToTextResult(stopped, allocator);
+    if (c.thread_id < 0) return mcp_types.error_result(allocator, "No stopped thread");
+    const stopped = try c.step_next();
+    return stopped_to_text_result(stopped, allocator);
 }
 
-pub fn stepInto(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Value) !json.Value {
+pub fn step_into(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Value) !json.Value {
     const c = try ctx.getClient();
-    if (c.thread_id < 0) return mcp_types.errorResult(allocator, "No stopped thread");
-    const stopped = try c.stepIn();
-    return stoppedToTextResult(stopped, allocator);
+    if (c.thread_id < 0) return mcp_types.error_result(allocator, "No stopped thread");
+    const stopped = try c.step_in();
+    return stopped_to_text_result(stopped, allocator);
 }
 
-pub fn stepOut(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Value) !json.Value {
+pub fn step_out(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Value) !json.Value {
     const c = try ctx.getClient();
-    if (c.thread_id < 0) return mcp_types.errorResult(allocator, "No stopped thread");
-    const stopped = try c.stepOut();
-    return stoppedToTextResult(stopped, allocator);
+    if (c.thread_id < 0) return mcp_types.error_result(allocator, "No stopped thread");
+    const stopped = try c.step_out();
+    return stopped_to_text_result(stopped, allocator);
 }
 
-pub fn pause(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Value) !json.Value {
+pub fn pause_exec(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Value) !json.Value {
     const c = try ctx.getClient();
-    if (c.thread_id < 0) return mcp_types.errorResult(allocator, "No active thread");
-    const stopped = try c.pause();
-    return stoppedToTextResult(stopped, allocator);
+    if (c.thread_id < 0) return mcp_types.error_result(allocator, "No active thread");
+    const stopped = try c.pause_exec();
+    return stopped_to_text_result(stopped, allocator);
 }
 
-pub fn continueExec(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Value) !json.Value {
+pub fn continue_exec(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Value) !json.Value {
     const c = try ctx.getClient();
-    const stopped = try c.continueExec();
-    return stoppedToTextResult(stopped, allocator);
+    const stopped = try c.continue_exec();
+    return stopped_to_text_result(stopped, allocator);
 }
 
-fn stoppedToTextResult(stopped: json.Value, allocator: std.mem.Allocator) !json.Value {
-    const reason = stopped.object.get("reason") orelse return mcp_types.textResult(allocator, "");
+fn stopped_to_text_result(stopped: json.Value, allocator: std.mem.Allocator) !json.Value {
+    const reason = stopped.object.get("reason") orelse return mcp_types.text_result(allocator, "");
     var buf = std.ArrayList(u8){};
     defer buf.deinit(allocator);
     var w = buf.writer(allocator);
@@ -146,7 +146,7 @@ fn stoppedToTextResult(stopped: json.Value, allocator: std.mem.Allocator) !json.
     }
     const tid = if (stopped.object.get("threadId")) |t| t.integer else 0;
     const is_exit = std.mem.eql(u8, reason.string, "exited") or std.mem.eql(u8, reason.string, "terminated");
-    return mcp_types.textResultWithState(allocator, buf.items, .{
+    return mcp_types.text_result_with_state(allocator, buf.items, .{
         .active = !is_exit,
         .stopped = !is_exit,
         .stoppedReason = reason.string,
@@ -154,22 +154,22 @@ fn stoppedToTextResult(stopped: json.Value, allocator: std.mem.Allocator) !json.
     });
 }
 
-pub fn restartDebugging(ctx: *Handler, allocator: std.mem.Allocator, args: ?json.Value) !json.Value {
+pub fn restart_debugging(ctx: *Handler, allocator: std.mem.Allocator, args: ?json.Value) !json.Value {
     ctx.stopSession();
-    return startDebugging(ctx, allocator, args);
+    return start_debugging(ctx, allocator, args);
 }
 
-pub fn addBreakpoint(ctx: *Handler, allocator: std.mem.Allocator, args: ?json.Value) !json.Value {
-    const a = args orelse return mcp_types.errorResult(allocator, "Missing arguments");
-    const file_path = a.object.get("fileFullPath") orelse return mcp_types.errorResult(allocator, "Missing fileFullPath");
-    const line_val = a.object.get("line") orelse return mcp_types.errorResult(allocator, "Missing line");
+pub fn add_breakpoint(ctx: *Handler, allocator: std.mem.Allocator, args: ?json.Value) !json.Value {
+    const a = args orelse return mcp_types.error_result(allocator, "Missing arguments");
+    const file_path = a.object.get("fileFullPath") orelse return mcp_types.error_result(allocator, "Missing fileFullPath");
+    const line_val = a.object.get("line") orelse return mcp_types.error_result(allocator, "Missing line");
     const condition = if (a.object.get("condition")) |c| c.string else null;
     const log_message = if (a.object.get("logMessage")) |lm| lm.string else null;
 
     _ = try ctx.getClient();
-    const line_i64 = jsonToI64(line_val);
+    const line_i64 = json_to_i64(line_val);
     if (line_i64 < 0 or line_i64 > std.math.maxInt(u32)) {
-        return mcp_types.errorResult(allocator, "Line number out of range");
+        return mcp_types.error_result(allocator, "Line number out of range");
     }
     const line: u32 = @intCast(line_i64);
 
@@ -194,39 +194,39 @@ pub fn addBreakpoint(ctx: *Handler, allocator: std.mem.Allocator, args: ?json.Va
             .log_message = owned_msg,
         };
         ctx.breakpoints.append(ctx.allocator, bp) catch |err| {
-            ctx.freeBreakpoint(bp);
+            ctx.free_breakpoint(bp);
             return err;
         };
     }
 
     // Sync with remote; rollback local list on failure
-    syncBreakpoints(ctx) catch |err| {
+    sync_breakpoints(ctx) catch |err| {
         // Remove the last appended breakpoint and free its strings
         if (ctx.breakpoints.items.len > 0) {
             const last = ctx.breakpoints.items.len - 1;
-            ctx.freeBreakpoint(ctx.breakpoints.items[last]);
+            ctx.free_breakpoint(ctx.breakpoints.items[last]);
             _ = ctx.breakpoints.orderedRemove(last);
         }
         return err;
     };
-    return mcp_types.textResult(allocator, "Breakpoint added");
+    return mcp_types.text_result(allocator, "Breakpoint added");
 }
 
-pub fn addLogpoint(ctx: *Handler, allocator: std.mem.Allocator, args: ?json.Value) !json.Value {
-    return addBreakpoint(ctx, allocator, args);
+pub fn add_logpoint(ctx: *Handler, allocator: std.mem.Allocator, args: ?json.Value) !json.Value {
+    return add_breakpoint(ctx, allocator, args);
 }
 
-pub fn removeBreakpoint(ctx: *Handler, allocator: std.mem.Allocator, args: ?json.Value) !json.Value {
-    const a = args orelse return mcp_types.errorResult(allocator, "Missing arguments");
-    const file_path = a.object.get("fileFullPath") orelse return mcp_types.errorResult(allocator, "Missing fileFullPath");
+pub fn remove_breakpoint(ctx: *Handler, allocator: std.mem.Allocator, args: ?json.Value) !json.Value {
+    const a = args orelse return mcp_types.error_result(allocator, "Missing arguments");
+    const file_path = a.object.get("fileFullPath") orelse return mcp_types.error_result(allocator, "Missing fileFullPath");
     const line_val = a.object.get("line");
 
     const client = try ctx.getClient();
     const line: u32 = if (line_val) |lv| blk: {
-        const lv_i64 = jsonToI64(lv);
-        if (lv_i64 < 0 or lv_i64 > std.math.maxInt(u32)) return mcp_types.errorResult(allocator, "Line number out of range");
+        const lv_i64 = json_to_i64(lv);
+        if (lv_i64 < 0 or lv_i64 > std.math.maxInt(u32)) return mcp_types.error_result(allocator, "Line number out of range");
         break :blk @intCast(lv_i64);
-    } else return mcp_types.errorResult(allocator, "Missing required parameter: line");
+    } else return mcp_types.error_result(allocator, "Missing required parameter: line");
 
     // Build the filtered DAP breakpoint list (everything except matches)
     var dap_bps = std.ArrayList(DapBreakpoint){};
@@ -243,9 +243,9 @@ pub fn removeBreakpoint(ctx: *Handler, allocator: std.mem.Allocator, args: ?json
     }
 
     // Send filtered list to remote first (so local is unchanged on failure)
-    const resp = try client.setBreakpoints(file_path.string, dap_bps.items);
-    const success = resp.object.get("success") orelse return mcp_types.errorResult(allocator, "Remote breakpoint removal failed");
-    if (!success.bool) return mcp_types.errorResult(allocator, "Remote breakpoint removal failed");
+    const resp = try client.set_breakpoints(file_path.string, dap_bps.items);
+    const success = resp.object.get("success") orelse return mcp_types.error_result(allocator, "Remote breakpoint removal failed");
+    if (!success.bool) return mcp_types.error_result(allocator, "Remote breakpoint removal failed");
 
     // Remote succeeded — now update local list
     var removed: usize = 0;
@@ -254,17 +254,17 @@ pub fn removeBreakpoint(ctx: *Handler, allocator: std.mem.Allocator, args: ?json
         i -= 1;
         const bp = ctx.breakpoints.items[i];
         if (std.mem.eql(u8, bp.file_path, file_path.string) and bp.line == line) {
-            ctx.freeBreakpoint(bp);
+            ctx.free_breakpoint(bp);
             _ = ctx.breakpoints.orderedRemove(i);
             removed += 1;
         }
     }
-    if (removed == 0) return mcp_types.textResult(allocator, "Breakpoint not found");
-    return mcp_types.textResult(allocator, "Breakpoint removed");
+    if (removed == 0) return mcp_types.text_result(allocator, "Breakpoint not found");
+    return mcp_types.text_result(allocator, "Breakpoint removed");
 }
 
-pub fn clearAllBreakpoints(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Value) !json.Value {
-    // Send empty setBreakpoints for each tracked file BEFORE freeing
+pub fn clear_all_breakpoints(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Value) !json.Value {
+    // Send empty set_breakpoints for each tracked file BEFORE freeing
     const c = try ctx.getClient();
 
     // Collect unique file paths into owned strings first
@@ -283,25 +283,25 @@ pub fn clearAllBreakpoints(ctx: *Handler, allocator: std.mem.Allocator, _: ?json
 
     // Clear remote first, then local (on error, local list is preserved)
     for (files.items) |file| {
-        const resp = try c.setBreakpoints(file, &.{});
+        const resp = try c.set_breakpoints(file, &.{});
         const bp_success = resp.object.get("success") orelse {
-            ctx.logger.fmt(.warn, "clearAllBreakpoints: missing success field for {s}", .{file});
-            return mcp_types.errorResult(allocator, "Failed to clear breakpoints remotely");
+            ctx.logger.fmt(.warn, "clear_all_breakpoints: missing success field for {s}", .{file});
+            return mcp_types.error_result(allocator, "Failed to clear breakpoints remotely");
         };
         if (!bp_success.bool) {
-            ctx.logger.fmt(.warn, "clearAllBreakpoints: setBreakpoints failed for {s}", .{file});
-            return mcp_types.errorResult(allocator, "Failed to clear breakpoints remotely");
+            ctx.logger.fmt(.warn, "clear_all_breakpoints: set_breakpoints failed for {s}", .{file});
+            return mcp_types.error_result(allocator, "Failed to clear breakpoints remotely");
         }
     }
     // Also clear any function breakpoints
-    _ = try c.setFunctionBreakpoints(&.{});
+    _ = try c.set_function_breakpoints(&.{});
 
-    ctx.freeAllBreakpoints();
-    return mcp_types.textResult(allocator, "All breakpoints cleared");
+    ctx.free_all_breakpoints();
+    return mcp_types.text_result(allocator, "All breakpoints cleared");
 }
 
-pub fn listBreakpoints(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Value) !json.Value {
-    if (ctx.breakpoints.items.len == 0) return mcp_types.textResult(allocator, "No breakpoints set");
+pub fn list_breakpoints(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Value) !json.Value {
+    if (ctx.breakpoints.items.len == 0) return mcp_types.text_result(allocator, "No breakpoints set");
 
     var buf = std.ArrayList(u8){};
     defer buf.deinit(allocator);
@@ -319,10 +319,10 @@ pub fn listBreakpoints(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Val
             try w.writeByte(')');
         }
     }
-    return mcp_types.textResult(allocator, buf.items);
+    return mcp_types.text_result(allocator, buf.items);
 }
 
-pub fn getVariables(ctx: *Handler, allocator: std.mem.Allocator, args: ?json.Value) !json.Value {
+pub fn get_variables(ctx: *Handler, allocator: std.mem.Allocator, args: ?json.Value) !json.Value {
     const c = try ctx.getClient();
 
     const scope_name = if (args) |a| blk: {
@@ -332,20 +332,20 @@ pub fn getVariables(ctx: *Handler, allocator: std.mem.Allocator, args: ?json.Val
     } else "local";
 
     // Get stack trace to find top frame
-    const stack_resp = try c.stackTrace(0, 10);
-    const stack_body = stack_resp.object.get("body") orelse return mcp_types.errorResult(allocator, "No stack trace body");
-    const stack_frames = stack_body.object.get("stackFrames") orelse return mcp_types.errorResult(allocator, "No stack frames");
+    const stack_resp = try c.stack_trace(0, 10);
+    const stack_body = stack_resp.object.get("body") orelse return mcp_types.error_result(allocator, "No stack trace body");
+    const stack_frames = stack_body.object.get("stackFrames") orelse return mcp_types.error_result(allocator, "No stack frames");
     const frames = stack_frames.array.items;
-    if (frames.len == 0) return mcp_types.textResult(allocator, "No frames on stack");
+    if (frames.len == 0) return mcp_types.text_result(allocator, "No frames on stack");
 
     const top_frame = frames[0];
-    const frame_id = top_frame.object.get("id") orelse return mcp_types.errorResult(allocator, "No frame id");
-    const fid = jsonToI64(frame_id);
+    const frame_id = top_frame.object.get("id") orelse return mcp_types.error_result(allocator, "No frame id");
+    const fid = json_to_i64(frame_id);
 
     // Get scopes for the top frame
     const scopes_resp = try c.scopes(fid);
-    const scopes_body = scopes_resp.object.get("body") orelse return mcp_types.errorResult(allocator, "No scopes body");
-    const scopes_arr = scopes_body.object.get("scopes") orelse return mcp_types.errorResult(allocator, "No scopes");
+    const scopes_body = scopes_resp.object.get("body") orelse return mcp_types.error_result(allocator, "No scopes body");
+    const scopes_arr = scopes_body.object.get("scopes") orelse return mcp_types.error_result(allocator, "No scopes");
     const scopes = scopes_arr.array.items;
 
     // Find target scope
@@ -357,16 +357,16 @@ pub fn getVariables(ctx: *Handler, allocator: std.mem.Allocator, args: ?json.Val
             break;
         }
     }
-    if (target_idx >= scopes.len) return mcp_types.errorResult(allocator, "Scope not found");
+    if (target_idx >= scopes.len) return mcp_types.error_result(allocator, "Scope not found");
 
     const scope = scopes[target_idx];
-    const var_ref = scope.object.get("variablesReference") orelse return mcp_types.errorResult(allocator, "No variablesReference");
-    const vref = jsonToI64(var_ref);
-    if (vref == 0) return mcp_types.textResult(allocator, "No variables in scope");
+    const var_ref = scope.object.get("variablesReference") orelse return mcp_types.error_result(allocator, "No variablesReference");
+    const vref = json_to_i64(var_ref);
+    if (vref == 0) return mcp_types.text_result(allocator, "No variables in scope");
 
     const vars_resp = try c.variables(vref);
-    const vars_body = vars_resp.object.get("body") orelse return mcp_types.errorResult(allocator, "No variables body");
-    const vars_arr = vars_body.object.get("variables") orelse return mcp_types.errorResult(allocator, "No variables");
+    const vars_body = vars_resp.object.get("body") orelse return mcp_types.error_result(allocator, "No variables body");
+    const vars_arr = vars_body.object.get("variables") orelse return mcp_types.error_result(allocator, "No variables");
 
     var buf = std.ArrayList(u8){};
     defer buf.deinit(allocator);
@@ -381,19 +381,19 @@ pub fn getVariables(ctx: *Handler, allocator: std.mem.Allocator, args: ?json.Val
         try w.writeAll(value.string);
     }
 
-    if (buf.items.len == 0) return mcp_types.textResult(allocator, "No variables");
-    return mcp_types.textResult(allocator, buf.items);
+    if (buf.items.len == 0) return mcp_types.text_result(allocator, "No variables");
+    return mcp_types.text_result(allocator, buf.items);
 }
 
-pub fn evaluateExpression(ctx: *Handler, allocator: std.mem.Allocator, args: ?json.Value) !json.Value {
-    const a = args orelse return mcp_types.errorResult(allocator, "Missing arguments");
-    const expr = a.object.get("expression") orelse return mcp_types.errorResult(allocator, "Missing expression");
+pub fn evaluate_expression(ctx: *Handler, allocator: std.mem.Allocator, args: ?json.Value) !json.Value {
+    const a = args orelse return mcp_types.error_result(allocator, "Missing arguments");
+    const expr = a.object.get("expression") orelse return mcp_types.error_result(allocator, "Missing expression");
 
     const c = try ctx.getClient();
 
     // Get top frame ID for context
     var frame_id: ?i64 = null;
-    if (c.stackTrace(0, 5)) |stack_resp| {
+    if (c.stack_trace(0, 5)) |stack_resp| {
         if (stack_resp.object.get("body")) |body| {
             if (body.object.get("stackFrames")) |frames| {
                 if (frames.array.items.len > 0) {
@@ -411,21 +411,21 @@ pub fn evaluateExpression(ctx: *Handler, allocator: std.mem.Allocator, args: ?js
 
     const resp = try c.evaluate(expr.string, "watch", frame_id);
 
-    const body = resp.object.get("body") orelse return mcp_types.errorResult(allocator, "No evaluate body");
-    const dap_result = body.object.get("result") orelse return mcp_types.textResult(allocator, "(no result)");
+    const body = resp.object.get("body") orelse return mcp_types.error_result(allocator, "No evaluate body");
+    const dap_result = body.object.get("result") orelse return mcp_types.text_result(allocator, "(no result)");
 
-    return mcp_types.textResult(allocator, dap_result.string);
+    return mcp_types.text_result(allocator, dap_result.string);
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-fn extractDir(path: []const u8) []const u8 {
+fn extract_dir(path: []const u8) []const u8 {
     const last_slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse
         std.mem.lastIndexOfScalar(u8, path, '\\') orelse return ".";
     return path[0..last_slash];
 }
 
-fn writeJsonString(w: anytype, s: []const u8) !void {
+fn write_json_string(w: anytype, s: []const u8) !void {
     for (s) |c| {
         switch (c) {
             '"' => try w.writeAll("\\\""),
@@ -442,7 +442,7 @@ fn writeJsonString(w: anytype, s: []const u8) !void {
     }
 }
 
-fn jsonToI64(val: json.Value) i64 {
+fn json_to_i64(val: json.Value) i64 {
     return switch (val) {
         .integer => |n| n,
         .float => |f| @intFromFloat(f),
@@ -450,7 +450,7 @@ fn jsonToI64(val: json.Value) i64 {
     };
 }
 
-fn syncBreakpoints(ctx: *Handler) !void {
+fn sync_breakpoints(ctx: *Handler) !void {
     const c = ctx.client orelse return;
     const all_bps = ctx.breakpoints.items;
 
@@ -484,14 +484,14 @@ fn syncBreakpoints(ctx: *Handler) !void {
                 idx += 1;
             }
         }
-        const resp = try c.setBreakpoints(file, dap_bps);
+        const resp = try c.set_breakpoints(file, dap_bps);
         // Check that the DAP call succeeded (response has success: true)
         const success = resp.object.get("success") orelse {
-            ctx.logger.fmt(.warn, "setBreakpoints response missing success for {s}", .{file});
+            ctx.logger.fmt(.warn, "set_breakpoints response missing success for {s}", .{file});
             return error.DapRequestFailed;
         };
         if (!success.bool) {
-            ctx.logger.fmt(.warn, "setBreakpoints failed for {s}", .{file});
+            ctx.logger.fmt(.warn, "set_breakpoints failed for {s}", .{file});
             return error.DapRequestFailed;
         }
     }

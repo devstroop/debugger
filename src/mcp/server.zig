@@ -87,14 +87,14 @@ pub fn Server(comptime Ctx: type) type {
 
             const parsed = json.parseFromSliceLeaky(json.Value, arena_alloc, raw, .{}) catch |err| {
                 self.logger.fmt(.err, "JSON parse error: {s}", .{@errorName(err)});
-                const fallback_id = extractId(raw);
-                try sendErrorRaw(out, fallback_id, -32700, "Parse error");
+                const fallback_id = extract_id(raw);
+                try send_error_raw(out, fallback_id, -32700, "Parse error");
                 return;
             };
             const root = parsed.object;
             const method = root.get("method") orelse {
                 self.logger.warn("message without method");
-                try sendErrorRaw(out, root.get("id"), -32600, "Invalid request");
+                try send_error_raw(out, root.get("id"), -32600, "Invalid request");
                 return;
             };
             const id = root.get("id");
@@ -107,15 +107,15 @@ pub fn Server(comptime Ctx: type) type {
             } else if (std.mem.eql(u8, method_str, "notifications/initialized")) {
                 // No response expected
             } else if (std.mem.eql(u8, method_str, "ping")) {
-                try sendPong(out, id);
+                try send_pong(out, id);
             } else if (std.mem.eql(u8, method_str, "tools/list")) {
                 try self.handleToolsList(id, out);
             } else if (std.mem.eql(u8, method_str, "tools/call")) {
                 try self.handleToolCall(id, params, out);
-            } else if (isNotification(method_str)) {
+            } else if (is_notification(method_str)) {
                 // Notifications have no id, they don't expect a response
             } else {
-                try sendErrorRaw(out, id, -32601, "Method not found");
+                try send_error_raw(out, id, -32601, "Method not found");
             }
         }
 
@@ -132,8 +132,8 @@ pub fn Server(comptime Ctx: type) type {
             defer buf.deinit(self.allocator);
             var w = buf.writer(self.allocator);
             try w.writeAll("{\"result\":{");
-            try writeJsonString(w, "protocolVersion"); try w.writeByte(':');
-            try writeJsonString(w, protocol_version); try w.writeByte(',');
+            try write_json_string(w, "protocolVersion"); try w.writeByte(':');
+            try write_json_string(w, protocol_version); try w.writeByte(',');
             try w.writeAll("\"capabilities\":{\"tools\":{\"listChanged\":true}},");
             try w.writeAll("\"serverInfo\":{\"name\":\"debugger\",\"version\":\"0.1.0\"},");
             try w.writeAll("\"instructions\":\"Debug MCP server\"");
@@ -172,11 +172,11 @@ pub fn Server(comptime Ctx: type) type {
 
         fn handleToolCall(self: *Self, id: ?json.Value, params: ?json.Value, out: std.fs.File) !void {
             const p = params orelse {
-                try sendErrorRaw(out, id, -32602, "Missing params");
+                try send_error_raw(out, id, -32602, "Missing params");
                 return;
             };
             const name = p.object.get("name") orelse {
-                try sendErrorRaw(out, id, -32602, "Missing tool name");
+                try send_error_raw(out, id, -32602, "Missing tool name");
                 return;
             };
             const args = p.object.get("arguments");
@@ -190,12 +190,12 @@ pub fn Server(comptime Ctx: type) type {
 
                 const result = handler(self.ctx, arena_alloc, args) catch |err| {
                     self.logger.fmt(.err, "Tool '{s}' failed: {s}", .{ name_str, @errorName(err) });
-                    try sendErrorRaw(out, id, -32603, "Internal error");
+                    try send_error_raw(out, id, -32603, "Internal error");
                     return;
                 };
-                try sendResultRaw(out, id, result);
+                try send_result_raw(out, id, result);
             } else {
-                try sendErrorRaw(out, id, -32601, "Tool not found");
+                try send_error_raw(out, id, -32601, "Tool not found");
             }
         }
     };
@@ -203,26 +203,26 @@ pub fn Server(comptime Ctx: type) type {
 
 // ── Free-standing JSON response helpers (no self needed) ──────────
 
-fn sendResultRaw(out: std.fs.File, id: ?json.Value, result: json.Value) !void {
+fn send_result_raw(out: std.fs.File, id: ?json.Value, result: json.Value) !void {
     var buf = std.ArrayList(u8){};
     defer buf.deinit(std.heap.page_allocator);
     var w = buf.writer(std.heap.page_allocator);
     try w.writeAll("{\"result\":");
-    try writeJsonValue(w, result);
+    try write_json_value(w, result);
     try w.writeAll(",\"jsonrpc\":\"2.0\",\"id\":");
     try writeId(w, id);
     try w.writeAll("}\n");
     try out.writeAll(buf.items);
 }
 
-fn sendErrorRaw(out: std.fs.File, id: ?json.Value, code: i32, msg: []const u8) !void {
+fn send_error_raw(out: std.fs.File, id: ?json.Value, code: i32, msg: []const u8) !void {
     var buf = std.ArrayList(u8){};
     defer buf.deinit(std.heap.page_allocator);
     var w = buf.writer(std.heap.page_allocator);
     try w.writeAll("{\"error\":{\"code\":");
     try w.print("{}", .{code});
     try w.writeAll(",\"message\":");
-    try writeJsonString(w, msg);
+    try write_json_string(w, msg);
     try w.writeAll("},\"jsonrpc\":\"2.0\",\"id\":");
     try writeId(w, id);
     try w.writeAll("}\n");
@@ -246,7 +246,7 @@ fn writeId(w: anytype, id_val: ?json.Value) !void {
     }
 }
 
-fn writeJsonString(w: anytype, s: []const u8) !void {
+fn write_json_string(w: anytype, s: []const u8) !void {
     try w.writeByte('"');
     for (s) |c| {
         switch (c) {
@@ -265,19 +265,19 @@ fn writeJsonString(w: anytype, s: []const u8) !void {
     try w.writeByte('"');
 }
 
-fn writeJsonValue(w: anytype, val: json.Value) !void {
+fn write_json_value(w: anytype, val: json.Value) !void {
     switch (val) {
         .null => try w.writeAll("null"),
         .bool => |b| try w.writeAll(if (b) "true" else "false"),
         .integer => |n| try w.print("{}", .{n}),
         .float => |f| try w.print("{}", .{f}),
-        .number_string => |s| try writeJsonString(w, s),
-        .string => |s| try writeJsonString(w, s),
+        .number_string => |s| try write_json_string(w, s),
+        .string => |s| try write_json_string(w, s),
         .array => |arr| {
             try w.writeByte('[');
             for (arr.items, 0..) |item, i| {
                 if (i > 0) try w.writeByte(',');
-                try writeJsonValue(w, item);
+                try write_json_value(w, item);
             }
             try w.writeByte(']');
         },
@@ -288,16 +288,16 @@ fn writeJsonValue(w: anytype, val: json.Value) !void {
             while (it.next()) |entry| {
                 if (!first) try w.writeByte(',');
                 first = false;
-                try writeJsonString(w, entry.key_ptr.*);
+                try write_json_string(w, entry.key_ptr.*);
                 try w.writeByte(':');
-                try writeJsonValue(w, entry.value_ptr.*);
+                try write_json_value(w, entry.value_ptr.*);
             }
             try w.writeByte('}');
         },
     }
 }
 
-fn sendPong(out: std.fs.File, id: ?json.Value) !void {
+fn send_pong(out: std.fs.File, id: ?json.Value) !void {
     var buf = std.ArrayList(u8){};
     defer buf.deinit(std.heap.page_allocator);
     var w = buf.writer(std.heap.page_allocator);
@@ -307,12 +307,12 @@ fn sendPong(out: std.fs.File, id: ?json.Value) !void {
     try out.writeAll(buf.items);
 }
 
-fn isNotification(method: []const u8) bool {
+fn is_notification(method: []const u8) bool {
     return std.mem.startsWith(u8, method, "notifications/") or
         std.mem.startsWith(u8, method, "$/");
 }
 
-fn extractId(raw: []const u8) ?json.Value {
+fn extract_id(raw: []const u8) ?json.Value {
     if (std.mem.indexOf(u8, raw, "\"id\"")) |id_pos| {
         const rest = raw[id_pos + 4 ..];
         const trimmed = std.mem.trimLeft(u8, rest, " \t:");
