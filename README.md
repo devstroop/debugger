@@ -4,16 +4,24 @@ An MCP (Model Context Protocol) server that bridges MCP tool calls to the Debug 
 
 ## Architecture
 
-```
-┌──────────────┐   JSON-RPC 2.0     ┌──────────────┐    DAP over TCP    ┌───────────┐
-│    VSCode,   │ ◄─── stdio ──────► │ debugger-mcp │ ◄────────────────► │ codelldb  │
-│   OpenCode,  │   (NDJSON lines)   │  (Zig)       │  (Content-Length)  │ (LLDB)    │
-│  Cline, Roo  │                    └──────┬───────┘                    └───────────┘
-│ (MCP client) │                           │
-└──────────────┘                     ┌─────┴──────┐
-                                     │   stderr   │
-                                     │ (logging)  │
-                                     └────────────┘
+```mermaid
+flowchart LR
+    subgraph Client["MCP Client"]
+        A["VS Code / OpenCode<br/>Cline / Roo"]
+    end
+    subgraph Bridge["debugger-mcp (Zig)"]
+        B["JSON-RPC 2.0 over stdio<br/>(NDJSON lines)"]
+    end
+    subgraph Adapter["Debug Adapter"]
+        C["codelldb (LLDB)"]
+    end
+    subgraph Logging["Logging"]
+        D["stderr"]
+    end
+
+    Client <--->|MCP| Bridge
+    Bridge <-->|DAP over TCP<br/>Content-Length| Adapter
+    Bridge -.->|log output| Logging
 ```
 
 - **MCP transport**: stdio (newline-delimited JSON per the MCP spec)
@@ -91,33 +99,42 @@ The binary is placed at `zig-out/bin/debugger-mcp`.
 ## Protocol Flow
 
 ### Startup
-```
-OpenCode                  debugger-mcp                 codelldb
-   │                          │                          │
-   │─── initialize ──────────►│                          │
-   │◄── {capabilities} ───────│                          │
-   │─── initialized ─────────►│                          │
-   │─── tools/list ──────────►│                          │
-   │◄── {tools[...]} ─────────│                          │
-   │                          │                          │
+
+```mermaid
+sequenceDiagram
+    participant Client as OpenCode
+    participant Server as debugger-mcp
+    participant Adapter as codelldb
+
+    Client->>Server: initialize
+    Server-->>Client: {capabilities}
+    Client->>Server: initialized
+    Client->>Server: tools/list
+    Server-->>Client: {tools[...]}
 ```
 
 ### Debug Session
-```
-   │─── start_debugging ─────►│                          │
-   │                          │──── spawn codelldb ─────►│
-   │                          │◄─── port ────────────────│
-   │                          │──── TCP connect ────────►│
-   │                          │──── DAP initialize ─────►│
-   │                          │◄─── {capabilities} ──────│
-   │                          │──── DAP launch ─────────►│
-   │                          │◄─── {success} ───────────│
-   │◄─── "session started" ───│                          │
-   │                          │                          │
-   │──── step_over ──────────►│                          │
-   │                          │──── DAP next ───────────►│
-   │                          │◄─── {response} ──────────│
-   │◄─── "stepped over" ──────│                          │
+
+```mermaid
+sequenceDiagram
+    participant Client as OpenCode
+    participant Server as debugger-mcp
+    participant Adapter as codelldb
+
+    Client->>Server: start_debugging
+    Server->>Adapter: spawn codelldb
+    Adapter-->>Server: port
+    Server->>Adapter: TCP connect
+    Server->>Adapter: DAP initialize
+    Adapter-->>Server: {capabilities}
+    Server->>Adapter: DAP launch
+    Adapter-->>Server: {success}
+    Server-->>Client: "session started"
+
+    Client->>Server: step_over
+    Server->>Adapter: DAP next
+    Adapter-->>Server: {response}
+    Server-->>Client: "stepped over"
 ```
 
 ## DAP Protocol Details

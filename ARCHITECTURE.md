@@ -6,19 +6,23 @@
 
 ## Module Dependencies
 
-```
-main.zig
-  ├── Logger.zig        (no deps)
-  ├── handler.zig
-  │     ├── dap.zig
-  │     │     ├── Logger.zig
-  │     │     └── std.posix, std.net, std.process
-  │     ├── mcp/types.zig
-  │     │     └── std.json
-  │     └── Logger.zig
-  └── mcp/server.zig
-        ├── mcp/types.zig
-        └── Logger.zig
+```mermaid
+graph TD
+    main[main.zig] --> Logger[Logger.zig]
+    main --> handler[handler.zig]
+    main --> server[mcp/server.zig]
+
+    handler --> dap[dap.zig]
+    handler --> types[mcp/types.zig]
+    handler --> Logger
+
+    dap --> Logger
+    dap --> stdlib[std.posix / std.net / std.process]
+
+    types --> stdjson[std.json]
+
+    server --> types
+    server --> Logger
 ```
 
 ## Generic Server Pattern `Server(Ctx)`
@@ -37,6 +41,22 @@ pub fn Server(comptime Ctx: type) type {
 
 `HandlerFn` is a function pointer type: `*const fn (ctx: *Ctx, allocator: std.mem.Allocator, params: ?json.Value) anyerror!json.Value`
 
+```mermaid
+flowchart LR
+    subgraph CompileTime["Compile Time"]
+        CtxType["Ctx type parameter"] --> ServerGen["Server(Ctx) generated<br/>with HandlerFn(Ctx)"]
+    end
+
+    subgraph Runtime["Run Time"]
+        ServerGen --> Register["registerTool(name, handlerFn)"]
+        Register --> Dispatch["dispatch(method, params)"]
+        Dispatch --> Lookup{"handlers.get(method)"}
+        Lookup -->|Found| Call["handler(ctx, arena_alloc, params)"]
+        Lookup -->|Not found| Error["send -32601<br/>Method not found"]
+        Call --> Arena["arena.deinit()<br/>(response sent)"]
+    end
+```
+
 This pattern enables:
 - **Compile-time dispatch** — no vtable, no interface overhead
 - **Type safety** — the handler context type is checked at compile time
@@ -46,40 +66,61 @@ This pattern enables:
 
 ### Connection Lifecycle
 
-```
-DapClient.init(allocator, logger, adapter_path)
-  │
-  ├── connect()
-  │     ├── spawn codelldb --port 0
-  │     ├── discoverPort(pid)      // poll ss -tlnp
-  │     └── tcpConnectToHost(127.0.0.1, port)
-  │
-  ├── initialize()
-  │     └── send("initialize", {clientID, adapterID})
-  │
-  ├── launch(program, cwd)
-  │     └── send("launch", {program, cwd, ...})
-  │
-  └── ...debug operations...
-
-DapClient.deinit()
-  ├── conn.close()
-  ├── proc.kill()
-  ├── read_buf.deinit()
-  └── parse_arena.deinit()
+```mermaid
+flowchart TD
+    A["DapClient.init(allocator, logger, adapter_path)"]
+    A --> B["connect()"]
+    B --> B1["spawn codelldb --port 0"]
+    B1 --> B2["discoverPort(pid)"]
+    B2 --> B3["tcpConnectToHost(127.0.0.1, port)"]
+    B3 --> C["initialize()"]
+    C --> C1["send('initialize', {clientID, adapterID})"]
+    C1 --> D["launch(program, cwd)"]
+    D --> D1["send('launch', {program, cwd, …})"]
+    D1 --> E["…debug operations…"]
+    E --> F["DapClient.deinit()"]
+    F --> F1["conn.close()"]
+    F --> F2["proc.kill()"]
+    F --> F3["read_buf.deinit()"]
+    F --> F4["parse_arena.deinit()"]
 ```
 
 ### Request-Response Correlation
 
-DAP uses a monotonic `seq` counter for requests. Responses carry a `request_seq` field matching the request's `seq`. The `send()` method:
-1. Increments `self.seq`
-2. Sends the request with `seq: self.seq`
-3. Calls `readResponse()` which loops reading TCP data until it finds a JSON object with `request_seq == self.seq`
-4. DAP events (responses without `request_seq`) are silently skipped
+DAP uses a monotonic `seq` counter for requests. Responses carry a `request_seq` field matching the request's `seq`. The `send()` method orchestrates this flow:
+
+```mermaid
+sequenceDiagram
+    participant Client as DapClient
+    participant Adapter as codelldb
+
+    Note over Client: self.seq += 1 → N
+    Client->>Adapter: send(seq=N, command, args)
+    activate Adapter
+    Adapter-->>Client: event (type="event", no request_seq)
+    Note over Client: readResponse() — silently skipped
+    Adapter-->>Client: response (request_seq=N)
+    deactivate Adapter
+    Note over Client: readResponse() — matched,<br/>checkSuccess(), return
+```
 
 ### Memory Strategy
 
 Two allocation patterns coexist:
+
+```mermaid
+flowchart LR
+    subgraph PerRequest["Per-request (send / writeFrame)"]
+        Build["ArrayList(u8) body"] --> Write["writeAll to TCP"]
+        Write --> Free["defer body.deinit()"]
+    end
+
+    subgraph Persistent["Persistent (readResponse)"]
+        Parse["tryParseMessage"] --> Reset["parse_arena.deinit()<br/>parse_arena.init()"]
+        Reset --> JSON["json.parseFromSliceLeaky(arena)"]
+    end
+```
+
 - **Per-request arenas**: `send()` creates a temporary `ArrayList(u8)` to build the JSON body, freed after `writeAll`
 - **Persistent parse arena**: `parse_arena` is reused across all response reads — deinitialized and re-created before each new parse
 
@@ -91,35 +132,62 @@ Each handler is a free function with the signature:
 fn handler(ctx: *Handler, allocator: std.mem.Allocator, args: ?json.Value) !json.Value
 ```
 
-The pattern:
-1. Extract arguments from `args` using `args.object.get("key") orelse return mcp_types.errorResult(...)`
-2. Call DAP methods on `ctx.getClient()` (which lazily creates the session if needed)
-3. Return `mcp_types.textResult(...)` on success or `mcp_types.errorResult(...)` on failure
+```mermaid
+flowchart TD
+    Call["handler(ctx, allocator, args)"]
+    Call --> Extract["extract arguments<br/>args.object.get('key') orelse …"]
+    Extract --> Success{"all required<br/>args present?"}
+    Success -->|No| ErrorResult["return errorResult(…)"]
+    Success -->|Yes| GetClient["ctx.getClient()"]
+    GetClient --> DAP["call DAP method<br/>(launch / setBreakpoints / …)"]
+    DAP --> Done{"DAP call<br/>succeeded?"}
+    Done -->|Yes| TextResult["return textResult(…)"]
+    Done -->|No| Propagate["return error"]
+```
 
 ### Session Lifecycle
 
 `Handler.ensureSession()` implements lazy singleton initialization:
-1. Checks `self.client` — returns existing session if present
-2. Allocates `DapClient` on the heap
-3. Calls `connect()` → `initialize()`
-4. Uses `errdefer` to clean up on any failure
-5. Stores pointer in `self.client`
+
+```mermaid
+flowchart TD
+    ES["ensureSession()"] --> Check{"self.client<br/>already set?"}
+    Check -->|Yes| Return["return existing client"]
+    Check -->|No| Alloc["alloc DapClient on heap"]
+    Alloc --> Init["init()"]
+    Init --> Conn["connect()"]
+    Conn --> InitDAP["initialize()"]
+    InitDAP --> Store["store in self.client"]
+    Store --> Return
+
+    Init -->|errdefer| Cleanup["c.deinit()<br/>self.allocator.destroy(c)"]
+
+    SS["stopSession()"] --> HasClient{"self.client<br/>!= null?"}
+    HasClient -->|Yes| Deinit["c.deinit()"]
+    Deinit --> Destroy["self.allocator.destroy(c)"]
+    Destroy --> Null["self.client = null"]
+    HasClient -->|No| Done["(no-op)"]
+```
 
 `stopSession()` reverses this: deinit, destroy, set null.
 
 ## Port Discovery
 
-```zig
-fn findPortForPid(pid: u32) !u16
+```mermaid
+flowchart TD
+    Start["findPortForPid(pid)"]
+    Start --> SS["run 'ss -tlnp'"]
+    SS --> Search["search output for 'pid=N,'"]
+    Search --> Found{"found?"}
+    Found -->|No| Sleep["sleep 300ms"]
+    Sleep --> Timeout{"15s elapsed?"}
+    Timeout -->|No| SS
+    Timeout -->|Yes| Fail["return error.PortDiscoveryFailed"]
+    Found -->|Yes| Tokenize["tokenize line by whitespace"]
+    Tokenize --> Extract["take field 3<br/>(local address:port)"]
+    Extract --> Parse["extract port<br/>after last colon"]
+    Parse --> Success["return port"]
 ```
-
-1. Runs `ss -tlnp` via `std.process.Child.run`
-2. Searches output for `pid=N,`
-3. Tokenizes the matching line by whitespace
-4. Takes field 3 (local address:port, e.g. `127.0.0.1:50678` or `[::]:50678`)
-5. Extracts port after the last colon in that field
-
-This runs every 300ms with a 15-second timeout. On success, the port is used for a TCP connection.
 
 ## Error Handling Strategy
 
@@ -148,8 +216,12 @@ This runs every 300ms with a 15-second timeout. On success, the port is used for
 ## Debug Logging
 
 The `Logger` module writes structured log lines to stderr:
-```
-[unix_timestamp] [LEVEL] message
+
+```mermaid
+flowchart LR
+    App["Application code"] --> LogCall["logger.info / .fmt / .err"]
+    LogCall --> Format["format: [timestamp] [LEVEL] message"]
+    Format --> Stderr["stderr"]
 ```
 
 Default level is `info`. Change at initialization in `main.zig`:
