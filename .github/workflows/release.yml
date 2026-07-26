@@ -1,0 +1,163 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag name to release (e.g. v0.1.0)'
+        required: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ZIG_VERSION: 0.15.2
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux (x86_64)
+            runner: ubuntu-latest
+            artifact: debugger-linux-x86_64
+            archive: tar.gz
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Verify build.zig.zon version matches tag
+        shell: bash
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          TAG_VERSION="${TAG#v}"
+          ZON_VERSION=$(grep -o '\.version\s*=\s*"[^"]*"' build.zig.zon | grep -o '"[^"]*"' | tr -d '"')
+          if [ "$TAG_VERSION" != "$ZON_VERSION" ]; then
+            echo "❌ Version mismatch!"
+            echo "   Git tag:             $TAG → $TAG_VERSION"
+            echo "   build.zig.zon:       $ZON_VERSION"
+            echo ""
+            echo "   Bump .version in build.zig.zon to $TAG_VERSION before tagging."
+            exit 1
+          fi
+          echo "✅ Tag $TAG matches build.zig.zon version $ZON_VERSION"
+
+      - name: Cache Zig compiler
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/setup-zig
+          key: zig-${{ env.ZIG_VERSION }}-${{ runner.os }}
+
+      - name: Setup Zig ${{ env.ZIG_VERSION }}
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache: true
+
+      - name: Show toolchain versions
+        run: zig version
+
+      - name: Run tests
+        run: zig build test --release=fast --summary all
+
+      - name: Build
+        shell: bash
+        run: zig build --release=fast --summary all
+
+      - name: List build outputs
+        shell: bash
+        run: ls -lhR zig-out/
+
+      - name: Stage release files
+        shell: bash
+        run: |
+          set -eu
+          STAGE="staging/${{ matrix.artifact }}"
+          mkdir -p "$STAGE"
+          cp -r zig-out/. "$STAGE/"
+          echo "${{ steps.version.outputs.tag }}" > "$STAGE/VERSION"
+          echo "${{ github.sha }}" > "$STAGE/COMMIT"
+          ls -lhR "$STAGE"
+
+      - name: Create archive (tar.gz)
+        shell: bash
+        run: |
+          set -eu
+          cd staging
+          tar -czf "${{ matrix.artifact }}-${{ steps.version.outputs.tag }}.tar.gz" "${{ matrix.artifact }}"
+          ls -lh "${{ matrix.artifact }}-${{ steps.version.outputs.tag }}.tar.gz"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: staging/${{ matrix.artifact }}-${{ steps.version.outputs.tag }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  create-release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Resolve version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect release assets and generate checksums
+        run: |
+          set -eu
+          mkdir -p release
+          find artifacts -type f -name '*.tar.gz' -exec cp {} release/ \;
+          cd release
+          sha256sum * > SHA256SUMS.txt
+          echo "Release assets:"
+          ls -lh
+          echo ""
+          echo "Checksums:"
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          files: release/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.tag, '-rc') || contains(steps.version.outputs.tag, '-beta') || contains(steps.version.outputs.tag, '-alpha') }}
