@@ -54,8 +54,8 @@ speculating.
    branches, data boundaries (where input enters, where output is produced).
 
 3. **Start the session.** Call `start_debugging` with the source file path and
-   optional `workingDirectory`. The server launches codelldb and pauses at the
-   program entry. The breakpoint you set will be hit after the program starts.
+   optional `workingDirectory`. The server launches codelldb and resumes until
+   the first breakpoint is hit (the launch request uses `stopOnEntry:false`).
 
 4. **Navigate and inspect.** Use `step_over`, `step_into`, `step_out`,
    `continue_execution` to move through code. Use `pause` to interrupt a

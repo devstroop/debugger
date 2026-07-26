@@ -1,7 +1,17 @@
 const std = @import("std");
 const net = std.net;
 const json = std.json;
-const log_mod = @import("Logger.zig");
+const log_mod = @import("../logger.zig");
+const types = @import("types.zig");
+const util = @import("util.zig");
+
+const DapBreakpoint = types.DapBreakpoint;
+const Error = types.Error;
+const writeJsonString = util.writeJsonString;
+const checkSuccess = util.checkSuccess;
+const jsonToI64 = util.jsonToI64;
+const findPortForPid = util.findPortForPid;
+const stoppedInfoToJson = util.stoppedInfoToJson;
 
 const dap_timeout_ms: u64 = 15_000;
 const poll_ms: u64 = 300;
@@ -17,6 +27,9 @@ pub const DapClient = struct {
     launch_seq: i64 = 0,
     thread_id: i64 = -1,
     started: bool = false,
+    pending_stopped_reason: ?[]const u8 = null,
+    pending_stopped_description: ?[]const u8 = null,
+    pending_stopped_thread: i64 = 0,
     read_buf: std.ArrayList(u8),
     parse_arena: std.heap.ArenaAllocator,
 
@@ -78,10 +91,8 @@ pub const DapClient = struct {
         }
     }
 
-    // ── High-level DAP operations ─────────────────────────────────
-
     pub fn initialize(self: *DapClient) !void {
-        const resp = try self.send("initialize", "{\"clientID\":\"debugger-mcp\",\"adapterID\":\"lldb\"}");
+        const resp = try self.send("initialize", "{\"clientID\":\"debugger\",\"adapterID\":\"lldb\"}");
         try checkSuccess(resp);
         self.logger.info("DAP initialized");
     }
@@ -94,12 +105,8 @@ pub const DapClient = struct {
         try writeJsonString(w, program);
         try w.writeAll("\",\"cwd\":\"");
         try writeJsonString(w, cwd);
-        try w.writeAll("\",\"type\":\"lldb\",\"request\":\"launch\",\"stopOnEntry\":true}");
+        try w.writeAll("\",\"type\":\"lldb\",\"request\":\"launch\",\"stopOnEntry\":false}");
 
-        // codelldb defers the launch response until after configurationDone.
-        // It sends `initialized` event immediately after launch, then waits.
-        // We send the request and wait for `initialized`; the launch response
-        // will be captured and validated by readResponse on a subsequent call.
         const seq = self.seq;
         self.seq += 1;
         self.launch_seq = seq;
@@ -112,7 +119,6 @@ pub const DapClient = struct {
 
             if (self.tryParseMessage()) |msg| {
                 const root = msg.object;
-                // Capture launch response if it arrives before initialized
                 if (root.get("request_seq")) |rs_val| {
                     if (self.launch_seq != 0 and jsonToI64(rs_val) == self.launch_seq) {
                         try checkSuccess(msg);
@@ -139,27 +145,31 @@ pub const DapClient = struct {
         }
     }
 
-    pub fn setBreakpoints(self: *DapClient, file_path: []const u8, line: u32, condition: ?[]const u8, log_message: ?[]const u8) !json.Value {
+    pub fn setBreakpoints(self: *DapClient, file_path: []const u8, breakpoints: []const DapBreakpoint) !json.Value {
         var args = std.ArrayList(u8){};
         defer args.deinit(self.allocator);
         var w = args.writer(self.allocator);
 
         try w.writeAll("{\"source\":{\"path\":\"");
         try writeJsonString(w, file_path);
-        try w.writeAll("\"},\"breakpoints\":[{\"line\":");
-        try w.print("{}", .{line});
-        if (condition) |c| {
-            try w.writeAll(",\"condition\":\"");
-            try writeJsonString(w, c);
-            try w.writeAll("\"");
+        try w.writeAll("\"},\"breakpoints\":[");
+        for (breakpoints, 0..) |bp, i| {
+            if (i > 0) try w.writeByte(',');
+            try w.writeAll("{\"line\":");
+            try w.print("{}", .{bp.line});
+            if (bp.condition) |c| {
+                try w.writeAll(",\"condition\":\"");
+                try writeJsonString(w, c);
+                try w.writeAll("\"");
+            }
+            if (bp.log_message) |lm| {
+                try w.writeAll(",\"logMessage\":\"");
+                try writeJsonString(w, lm);
+                try w.writeAll("\"");
+            }
+            try w.writeAll("}");
         }
-        if (log_message) |lm| {
-            try w.writeAll(",\"logMessage\":\"");
-            try writeJsonString(w, lm);
-            try w.writeAll("\"");
-        }
-        try w.writeAll("}]}");
-
+        try w.writeAll("]}");
         return self.send("setBreakpoints", args.items);
     }
 
@@ -186,61 +196,92 @@ pub const DapClient = struct {
         self.logger.info("Configuration done, program started");
     }
 
+    fn clearPendingStopped(self: *DapClient) void {
+        if (self.pending_stopped_reason) |r| self.allocator.free(r);
+        if (self.pending_stopped_description) |d| self.allocator.free(d);
+        self.pending_stopped_reason = null;
+        self.pending_stopped_description = null;
+        self.pending_stopped_thread = 0;
+    }
+
     pub fn next(self: *DapClient) !json.Value {
+        self.clearPendingStopped();
         _ = self.processPendingEvents() catch {};
         if (self.thread_id < 0) return error.InvalidThreadId;
         var args = std.ArrayList(u8){};
         defer args.deinit(self.allocator);
         var w = args.writer(self.allocator);
         try w.print("{{\"threadId\":{}}}", .{self.thread_id});
-        return self.send("next", args.items);
+        const resp = try self.send("next", args.items);
+        try checkSuccess(resp);
+        const stopped = try self.waitForStopped();
+        return stoppedInfoToJson(stopped, self.allocator);
     }
 
     pub fn stepIn(self: *DapClient) !json.Value {
+        self.clearPendingStopped();
         _ = self.processPendingEvents() catch {};
         if (self.thread_id < 0) return error.InvalidThreadId;
         var args = std.ArrayList(u8){};
         defer args.deinit(self.allocator);
         var w = args.writer(self.allocator);
         try w.print("{{\"threadId\":{}}}", .{self.thread_id});
-        return self.send("stepIn", args.items);
+        const resp = try self.send("stepIn", args.items);
+        try checkSuccess(resp);
+        const stopped = try self.waitForStopped();
+        return stoppedInfoToJson(stopped, self.allocator);
     }
 
     pub fn stepOut(self: *DapClient) !json.Value {
+        self.clearPendingStopped();
         _ = self.processPendingEvents() catch {};
         if (self.thread_id < 0) return error.InvalidThreadId;
         var args = std.ArrayList(u8){};
         defer args.deinit(self.allocator);
         var w = args.writer(self.allocator);
         try w.print("{{\"threadId\":{}}}", .{self.thread_id});
-        return self.send("stepOut", args.items);
+        const resp = try self.send("stepOut", args.items);
+        try checkSuccess(resp);
+        const stopped = try self.waitForStopped();
+        return stoppedInfoToJson(stopped, self.allocator);
     }
 
     pub fn pause(self: *DapClient) !json.Value {
+        self.clearPendingStopped();
         _ = self.processPendingEvents() catch {};
         if (self.thread_id < 0) return error.InvalidThreadId;
         var args = std.ArrayList(u8){};
         defer args.deinit(self.allocator);
         var w = args.writer(self.allocator);
         try w.print("{{\"threadId\":{}}}", .{self.thread_id});
-        return self.send("pause", args.items);
+        const resp = try self.send("pause", args.items);
+        try checkSuccess(resp);
+        const stopped = try self.waitForStopped();
+        return stoppedInfoToJson(stopped, self.allocator);
     }
 
     pub fn continueExec(self: *DapClient) !json.Value {
-        // Allow configurationDone to start the program even without a stopped thread
+        self.clearPendingStopped();
+        _ = self.processPendingEvents() catch {};
         if (!self.started) {
             try self.configurationDone();
-            // After configDone, program runs and may stop at a breakpoint.
-            return json.Value{ .string = "" };
+            self.started = true;
+            const stopped = try self.waitForStopped();
+            return stoppedInfoToJson(stopped, self.allocator);
         }
+        if (self.thread_id < 0) return error.InvalidThreadId;
         var args = std.ArrayList(u8){};
         defer args.deinit(self.allocator);
         var w = args.writer(self.allocator);
         try w.print("{{\"threadId\":{}}}", .{self.thread_id});
-        return self.send("continue", args.items);
+        const resp = try self.send("continue", args.items);
+        try checkSuccess(resp);
+        const stopped = try self.waitForStopped();
+        return stoppedInfoToJson(stopped, self.allocator);
     }
 
     pub fn stackTrace(self: *DapClient, start_frame: i64, levels: i64) !json.Value {
+        self.clearPendingStopped();
         _ = self.processPendingEvents() catch {};
         if (self.thread_id < 0) return error.InvalidThreadId;
         var args = std.ArrayList(u8){};
@@ -296,7 +337,6 @@ pub const DapClient = struct {
     }
 
     pub fn send(self: *DapClient, command: []const u8, args_msg: ?[]const u8) !json.Value {
-        // Process pending events (e.g. stopped) to update state before building request
         _ = self.processPendingEvents() catch {};
         const seq = self.seq;
         self.seq += 1;
@@ -363,12 +403,10 @@ pub const DapClient = struct {
 
             if (self.tryParseMessage()) |msg| {
                 const root = msg.object;
-                // Capture thread ID from stopped events
-                self.captureStoppedThreadId(msg);
+                self.captureStoppedThreadId(msg, true);
 
                 if (root.get("request_seq")) |rs_val| {
                     const rs = jsonToI64(rs_val);
-                    // Capture pending launch response and verify it
                     if (self.launch_seq != 0 and rs == self.launch_seq) {
                         try checkSuccess(msg);
                         self.launch_seq = 0;
@@ -378,7 +416,6 @@ pub const DapClient = struct {
                         return msg;
                     }
                 }
-                // Events (type=="event") have no request_seq — skip them
             } else |err| switch (err) {
                 error.ProtocolError => return err,
                 error.NeedMoreData => {
@@ -392,11 +429,92 @@ pub const DapClient = struct {
         }
     }
 
+    pub const StoppedInfo = types.StoppedInfo;
+
+    fn waitForStopped(self: *DapClient) !StoppedInfo {
+        if (self.pending_stopped_reason) |reason| {
+            const owned_reason = try self.allocator.dupe(u8, reason);
+            const owned_desc = if (self.pending_stopped_description) |d| try self.allocator.dupe(u8, d) else null;
+            self.clearPendingStopped();
+            return StoppedInfo{
+                .reason = owned_reason,
+                .thread_id = self.pending_stopped_thread,
+                .description = owned_desc,
+            };
+        }
+
+        const stop_timeout_ns: u64 = 30_000_000_000;
+        var timer = std.time.Timer.start() catch return error.Timeout;
+        while (true) {
+            if (timer.read() > stop_timeout_ns) return error.Timeout;
+
+            const msg = self.tryParseMessage() catch |err| {
+                if (err == error.NeedMoreData) {
+                    const prev_len = self.read_buf.items.len;
+                    self.readMore() catch |read_err| {
+                        if (read_err == error.Timeout) {
+                            std.Thread.sleep(10 * std.time.ns_per_ms);
+                            continue;
+                        }
+                        return read_err;
+                    };
+                    if (self.read_buf.items.len == prev_len) {
+                        std.Thread.sleep(10 * std.time.ns_per_ms);
+                    }
+                    continue;
+                }
+                if (err == error.ProtocolError) {
+                    self.read_buf.clearAndFree(self.allocator);
+                    continue;
+                }
+                return err;
+            };
+
+            const root = msg.object;
+
+            if (root.get("request_seq") != null) {
+                self.logger.fmt(.warn, "waitForStopped consumed a response, buffer may be out of sync", .{});
+                continue;
+            }
+
+            const msg_type_val = root.get("type") orelse continue;
+            if (msg_type_val != .string) continue;
+            if (!std.mem.eql(u8, msg_type_val.string, "event")) continue;
+            const event_val = root.get("event") orelse continue;
+            if (event_val != .string) continue;
+
+            if (std.mem.eql(u8, event_val.string, "exited") or
+                std.mem.eql(u8, event_val.string, "terminated"))
+            {
+                self.thread_id = -1;
+                return StoppedInfo{ .reason = "exited", .thread_id = 0, .description = null };
+            }
+
+            if (!std.mem.eql(u8, event_val.string, "stopped")) {
+                std.Thread.sleep(10 * std.time.ns_per_ms);
+                continue;
+            }
+
+            const body_val = root.get("body") orelse return error.ProtocolError;
+            if (body_val != .object) return error.ProtocolError;
+            const body = body_val.object;
+            const tid_val = body.get("threadId") orelse return error.ProtocolError;
+            self.thread_id = jsonToI64(tid_val);
+
+            const reason_val = body.get("reason") orelse return error.ProtocolError;
+            if (reason_val != .string) return error.ProtocolError;
+            const desc_val = body.get("description");
+
+            return StoppedInfo{
+                .reason = reason_val.string,
+                .thread_id = self.thread_id,
+                .description = if (desc_val) |d| if (d == .string) d.string else null else null,
+            };
+        }
+    }
+
     fn processPendingEvents(self: *DapClient) !void {
-        // Read available data without blocking
         _ = self.readMore() catch {};
-        // Scan the buffer: remove events (capturing state), keep responses
-        // We work byte-level: find Content-Length header, parse JSON body
         var keep = std.ArrayList(u8){};
         var temp_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer {
@@ -414,36 +532,65 @@ pub const DapClient = struct {
             const total = body_start + cl;
             if (data.len < total) break;
 
-            // Peek at the message type without consuming
             const body_slice = data[body_start..total];
             const parsed = json.parseFromSliceLeaky(json.Value, temp_arena.allocator(), body_slice, .{}) catch break;
             const is_response = parsed.object.get("request_seq") != null;
             if (is_response) {
-                // Keep response in the buffer — append to keep list
                 keep.appendSlice(self.allocator, data[0..total]) catch break;
             } else {
-                // Event — process it (capture thread_id), discard from buffer
-                self.captureStoppedThreadId(parsed);
+                self.captureStoppedThreadId(parsed, false);
             }
             data = data[total..];
         }
-        // Copy remaining unprocessed data before clearing buffer
         const remaining = try self.allocator.dupe(u8, data);
         defer self.allocator.free(remaining);
         self.read_buf.clearRetainingCapacity();
-        self.read_buf.appendSlice(self.allocator, keep.items) catch {};
-        self.read_buf.appendSlice(self.allocator, remaining) catch {};
+        try self.read_buf.appendSlice(self.allocator, keep.items);
+        try self.read_buf.appendSlice(self.allocator, remaining);
     }
 
-    fn captureStoppedThreadId(self: *DapClient, msg: json.Value) void {
+    fn captureStoppedThreadId(self: *DapClient, msg: json.Value, set_pending: bool) void {
+        if (msg != .object) return;
         const root = msg.object;
-        const msg_type = root.get("type") orelse return;
-        if (!std.mem.eql(u8, msg_type.string, "event")) return;
-        const event = root.get("event") orelse return;
-        if (!std.mem.eql(u8, event.string, "stopped")) return;
-        const body = root.get("body") orelse return;
-        const tid = body.object.get("threadId") orelse return;
-        self.thread_id = jsonToI64(tid);
+        const msg_type_val = root.get("type") orelse return;
+        if (msg_type_val != .string) return;
+        if (!std.mem.eql(u8, msg_type_val.string, "event")) return;
+        const event_val = root.get("event") orelse return;
+        if (event_val != .string) return;
+
+        if (std.mem.eql(u8, event_val.string, "exited") or
+            std.mem.eql(u8, event_val.string, "terminated"))
+        {
+            self.thread_id = -1;
+            if (set_pending) {
+                self.clearPendingStopped();
+                self.pending_stopped_reason = self.allocator.dupe(u8, event_val.string) catch null;
+                self.pending_stopped_description = null;
+                self.pending_stopped_thread = 0;
+            }
+            return;
+        }
+
+        if (!std.mem.eql(u8, event_val.string, "stopped")) return;
+        const body_val = root.get("body") orelse return;
+        if (body_val != .object) return;
+        const body = body_val.object;
+        const tid_val = body.get("threadId") orelse return;
+        self.thread_id = jsonToI64(tid_val);
+        if (set_pending) {
+            self.clearPendingStopped();
+            if (body.get("reason")) |r_val| {
+                if (r_val == .string) {
+                    self.pending_stopped_reason = self.allocator.dupe(u8, r_val.string) catch null;
+                }
+            }
+            if (body.get("description")) |d_val| {
+                if (d_val == .string) {
+                    self.pending_stopped_description = self.allocator.dupe(u8, d_val.string) catch null;
+                }
+            }
+            self.pending_stopped_thread = self.thread_id;
+        }
         self.logger.fmt(.debug, "Captured thread_id={}", .{self.thread_id});
     }
 
@@ -464,7 +611,6 @@ pub const DapClient = struct {
 
         const body = data[body_start..total];
 
-        // Reuse persistent arena — previous response is now invalid
         self.parse_arena.deinit();
         self.parse_arena = std.heap.ArenaAllocator.init(self.allocator);
         const parsed = json.parseFromSliceLeaky(json.Value, self.parse_arena.allocator(), body, .{}) catch return error.ProtocolError;
@@ -498,87 +644,4 @@ pub const DapClient = struct {
             return error.ConnectionClosed;
         }
     }
-};
-
-// ── Free functions ───────────────────────────────────────────────────
-
-fn findPortForPid(pid: u32) !u16 {
-    const allocator = std.heap.page_allocator;
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{ "ss", "-tlnp" },
-    }) catch return error.SsFailed;
-    defer {
-        allocator.free(result.stdout);
-        allocator.free(result.stderr);
-    }
-
-    const pid_str = try std.fmt.allocPrint(allocator, "pid={},", .{pid});
-    defer allocator.free(pid_str);
-
-    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
-    while (lines.next()) |line| {
-        if (std.mem.indexOf(u8, line, pid_str) == null) continue;
-        // Split by whitespace; field 3 (0-indexed) is Local Address:Port
-        var tokens = std.mem.tokenizeAny(u8, line, " \t");
-        var field_idx: usize = 0;
-        var local_addr: ?[]const u8 = null;
-        while (tokens.next()) |token| : (field_idx += 1) {
-            if (field_idx == 3) {
-                local_addr = token;
-                break;
-            }
-        }
-        const addr = local_addr orelse continue;
-        // Find last colon in the local address (port separator)
-        const colon = std.mem.lastIndexOfScalar(u8, addr, ':') orelse continue;
-        const port_str = addr[colon + 1 ..];
-        return std.fmt.parseInt(u16, port_str, 10);
-    }
-    return error.PortNotFound;
-}
-
-fn writeJsonString(w: anytype, s: []const u8) !void {
-    for (s) |c| {
-        switch (c) {
-            '"' => try w.writeAll("\\\""),
-            '\\' => try w.writeAll("\\\\"),
-            '\n' => try w.writeAll("\\n"),
-            '\r' => try w.writeAll("\\r"),
-            '\t' => try w.writeAll("\\t"),
-            0...7, 0xb, 0xc, 0xe...0x1f => {
-                try w.writeAll("\\u00");
-                try w.print("{x:0>2}", .{@as(u8, c)});
-            },
-            else => try w.writeByte(c),
-        }
-    }
-}
-
-fn checkSuccess(response: json.Value) !void {
-    if (response.object.get("success")) |s| {
-        if (!s.bool) return error.DapRequestFailed;
-    }
-}
-
-fn jsonToI64(val: json.Value) i64 {
-    return switch (val) {
-        .integer => |n| n,
-        .float => |f| @intFromFloat(f),
-        else => 0,
-    };
-}
-
-pub const Error = error{
-    NotConnected,
-    PortDiscoveryFailed,
-    SsFailed,
-    PortNotFound,
-    Timeout,
-    DapRequestFailed,
-    ProtocolError,
-    NeedMoreData,
-    ConnectionClosed,
-    ReadError,
-    MissingParams,
 };
