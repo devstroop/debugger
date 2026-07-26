@@ -6,11 +6,11 @@ An MCP (Model Context Protocol) server that bridges MCP tool calls to the Debug 
 
 ```
 ┌──────────────┐   JSON-RPC 2.0     ┌──────────────┐    DAP over TCP    ┌───────────┐
-│   OpenCode   │ ◄─── stdio ──────► │ debugger-mcp │ ◄────────────────► │ codelldb  │
-│ (MCP client) │   (NDJSON lines)   │  (Zig)       │  (Content-Length)  │ (LLDB)    │
-└──────────────┘                    └──────┬───────┘                    └───────────┘
-                                           │
-                                     ┌─────┴──────┐
+│    VSCode,   │ ◄─── stdio ──────► │ debugger-mcp │ ◄────────────────► │ codelldb  │
+│   OpenCode,  │   (NDJSON lines)   │  (Zig)       │  (Content-Length)  │ (LLDB)    │
+│  Cline, Roo  │                    └──────┬───────┘                    └───────────┘
+│ (MCP client) │                           │
+└──────────────┘                     ┌─────┴──────┐
                                      │   stderr   │
                                      │ (logging)  │
                                      └────────────┘
