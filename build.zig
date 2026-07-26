@@ -14,6 +14,10 @@ pub fn build(b: *std.Build) void {
         .name = "debugger",
         .root_module = exe_module,
     });
+    // Required on macOS for system symbols (fork, exit, getcwd, etc.)
+    if (target.result.os.tag == .macos) {
+        exe.linkLibC();
+    }
 
     b.installArtifact(exe);
 
@@ -35,6 +39,9 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    if (target.result.os.tag == .macos) {
+        t.linkLibC();
+    }
     const run_t = b.addRunArtifact(t);
     test_step.dependOn(&run_t.step);
 }
