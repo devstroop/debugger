@@ -6,9 +6,6 @@ on:
   pull_request:
     branches: [master]
 
-env:
-  ZIG_VERSION: 0.15.2
-
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -16,11 +13,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Zig
-        run: |
-          curl -fsSL https://ziglang.org/download/${{ env.ZIG_VERSION }}/zig-linux-x86_64-${{ env.ZIG_VERSION }}.tar.xz -o zig.tar.xz
-          tar -xf zig.tar.xz
-          echo "$PWD/zig-linux-x86_64-${{ env.ZIG_VERSION }}" >> $GITHUB_PATH
+      - name: Cache Zig compiler
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/setup-zig
+          key: zig-0.15.2-${{ runner.os }}
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+          cache: true
 
       - name: zig build
         run: zig build
@@ -34,11 +37,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Zig
-        run: |
-          curl -fsSL https://ziglang.org/download/${{ env.ZIG_VERSION }}/zig-macos-aarch64-${{ env.ZIG_VERSION }}.tar.xz -o zig.tar.xz
-          tar -xf zig.tar.xz
-          echo "$PWD/zig-macos-aarch64-${{ env.ZIG_VERSION }}" >> $GITHUB_PATH
+      - name: Cache Zig compiler
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/setup-zig
+          key: zig-0.15.2-${{ runner.os }}
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+          cache: true
 
       - name: zig build
         run: zig build
