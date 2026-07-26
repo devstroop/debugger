@@ -1,6 +1,6 @@
 const std = @import("std");
 const mcp_server = @import("mcp/server.zig");
-const handler_mod = @import("handler.zig");
+const handler_mod = @import("mcp/handler.zig");
 const log_mod = @import("Logger.zig");
 
 pub fn main() !void {

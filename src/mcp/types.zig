@@ -6,7 +6,6 @@ pub fn textContent(text: []const u8) json.Value {
 }
 
 pub fn textResult(allocator: std.mem.Allocator, text: []const u8) !json.Value {
-    // Build proper MCP result: {"content":[{"type":"text","text":"..."}],"isError":false}
     var content_arr = json.Array.init(allocator);
     var item = json.ObjectMap.init(allocator);
     try item.put("type", json.Value{ .string = "text" });

@@ -1,8 +1,8 @@
 const std = @import("std");
 const json = std.json;
-const dap = @import("dap.zig");
-const log_mod = @import("Logger.zig");
-const mcp_types = @import("mcp/types.zig");
+const dap = @import("../dap.zig");
+const log_mod = @import("../Logger.zig");
+const mcp_types = @import("types.zig");
 
 /// Glue layer between MCP tool calls and DAP operations.
 pub const Handler = struct {
@@ -61,7 +61,7 @@ pub fn startDebugging(ctx: *Handler, allocator: std.mem.Allocator, args: ?json.V
     const cwd = if (wd_arg) |wd| wd.string else extractDir(file_path.string);
     try c.launch(file_path.string, cwd);
 
-    return mcp_types.textResult(allocator, "Debug session started (stopped at entry)");
+    return mcp_types.textResult(allocator, "Debug session started");
 }
 
 pub fn stopDebugging(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Value) !json.Value {
@@ -71,31 +71,37 @@ pub fn stopDebugging(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Value
 
 pub fn stepOver(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Value) !json.Value {
     const c = try ctx.getClient();
-    _ = try c.next(1);
+    if (c.thread_id < 0) return mcp_types.errorResult(allocator, "No stopped thread; use continue_execution to start the program");
+    _ = try c.next();
     return mcp_types.textResult(allocator, "Stepped over");
 }
 
 pub fn stepInto(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Value) !json.Value {
     const c = try ctx.getClient();
-    _ = try c.stepIn(1);
+    if (c.thread_id < 0) return mcp_types.errorResult(allocator, "No stopped thread; use continue_execution to start the program");
+    _ = try c.stepIn();
     return mcp_types.textResult(allocator, "Stepped into");
 }
 
 pub fn stepOut(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Value) !json.Value {
     const c = try ctx.getClient();
-    _ = try c.stepOut(1);
+    if (c.thread_id < 0) return mcp_types.errorResult(allocator, "No stopped thread; use continue_execution to start the program");
+    _ = try c.stepOut();
     return mcp_types.textResult(allocator, "Stepped out");
 }
 
 pub fn pause(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Value) !json.Value {
     const c = try ctx.getClient();
-    _ = try c.pause(1);
+    if (c.thread_id < 0) return mcp_types.errorResult(allocator, "No active thread to pause");
+    _ = try c.pause();
     return mcp_types.textResult(allocator, "Paused");
 }
 
 pub fn continueExec(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Value) !json.Value {
     const c = try ctx.getClient();
-    _ = try c.continueExec(1);
+    // Allow continueExec even without a stopped thread — it may be the
+    // first call that sends configurationDone to start the program.
+    _ = try c.continueExec();
     return mcp_types.textResult(allocator, "Continued");
 }
 
@@ -164,7 +170,7 @@ pub fn getVariables(ctx: *Handler, allocator: std.mem.Allocator, args: ?json.Val
     } else "local";
 
     // Get stack trace to find top frame
-    const stack_resp = try c.stackTrace(1, 0, 10);
+    const stack_resp = try c.stackTrace(0, 10);
     const stack_body = stack_resp.object.get("body") orelse return mcp_types.errorResult(allocator, "No stack trace body");
     const stack_frames = stack_body.object.get("stackFrames") orelse return mcp_types.errorResult(allocator, "No stack frames");
     const frames = stack_frames.array.items;
@@ -222,7 +228,26 @@ pub fn evaluateExpression(ctx: *Handler, allocator: std.mem.Allocator, args: ?js
     const expr = a.object.get("expression") orelse return mcp_types.errorResult(allocator, "Missing expression");
 
     const c = try ctx.getClient();
-    const resp = try c.evaluate(expr.string, "repl");
+
+    // Get top frame ID for context
+    var frame_id: ?i64 = null;
+    if (c.stackTrace(0, 5)) |stack_resp| {
+        if (stack_resp.object.get("body")) |body| {
+            if (body.object.get("stackFrames")) |frames| {
+                if (frames.array.items.len > 0) {
+                    if (frames.array.items[0].object.get("id")) |fid| {
+                        frame_id = switch (fid) {
+                            .integer => |n| n,
+                            .float => |f| @intFromFloat(f),
+                            else => null,
+                        };
+                    }
+                }
+            }
+        }
+    } else |_| {}
+
+    const resp = try c.evaluate(expr.string, "watch", frame_id);
 
     const body = resp.object.get("body") orelse return mcp_types.errorResult(allocator, "No evaluate body");
     const dap_result = body.object.get("result") orelse return mcp_types.textResult(allocator, "(no result)");
