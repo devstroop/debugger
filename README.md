@@ -141,6 +141,14 @@ src/
     └── types.zig    # MCP result/error builders
 ```
 
+## Agent Skill
+
+A `debug-live` Agent Skill is included at `skills/debug-live/SKILL.md` for use with
+skills-compatible harnesses. It teaches the LLM a complete debugging workflow:
+when to invoke debugging, root cause analysis framework, breakpoint strategy,
+tool-call patterns, and things to avoid. Install it into your agent's skills
+directory to enable automatic skill discovery.
+
 ## Limitations
 
 - **Linux-only** port discovery (uses `ss -tlnp` from `iproute2`)

@@ -29,3 +29,6 @@ main
 # Temporary build files
 *.dSYM/
 build/
+
+# Temporary files
+review.md
