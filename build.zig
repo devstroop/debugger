@@ -14,7 +14,6 @@ pub fn build(b: *std.Build) void {
         .name = "debugger",
         .root_module = exe_module,
     });
-    exe.linkLibC();
 
     b.installArtifact(exe);
 
@@ -36,7 +35,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    t.linkLibC();
     const run_t = b.addRunArtifact(t);
     test_step.dependOn(&run_t.step);
 }
