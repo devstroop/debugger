@@ -30,5 +30,6 @@ main
 *.dSYM/
 build/
 
-# Temporary files
+# Local development files
 review.md
+issues.md

@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  ZIG_VERSION: 0.15.2
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        run: |
+          curl -fsSL https://ziglang.org/download/${{ env.ZIG_VERSION }}/zig-linux-x86_64-${{ env.ZIG_VERSION }}.tar.xz -o zig.tar.xz
+          tar -xf zig.tar.xz
+          echo "$PWD/zig-linux-x86_64-${{ env.ZIG_VERSION }}" >> $GITHUB_PATH
+
+      - name: zig build
+        run: zig build
+
+      - name: zig build test
+        run: zig build test
+
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        run: |
+          curl -fsSL https://ziglang.org/download/${{ env.ZIG_VERSION }}/zig-macos-aarch64-${{ env.ZIG_VERSION }}.tar.xz -o zig.tar.xz
+          tar -xf zig.tar.xz
+          echo "$PWD/zig-macos-aarch64-${{ env.ZIG_VERSION }}" >> $GITHUB_PATH
+
+      - name: zig build
+        run: zig build
+
+      - name: zig build test
+        run: zig build test
