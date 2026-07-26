@@ -8,7 +8,7 @@ pub const Level = enum(u3) {
     warn = 2,
     err = 3,
 
-    fn label(self: Level) []const u8 {
+    pub fn label(self: Level) []const u8 {
         return switch (self) {
             .debug => "DEBUG",
             .info => "INFO",

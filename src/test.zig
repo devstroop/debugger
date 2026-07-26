@@ -6,3 +6,6 @@ test {
 test {
     _ = @import("test/util_test.zig");
 }
+test {
+    _ = @import("test/logger_test.zig");
+}
