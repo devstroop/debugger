@@ -1,5 +1,6 @@
 const std = @import("std");
 const json = std.json;
+const builtin = @import("builtin");
 pub const types = @import("types.zig");
 
 pub fn stopped_info_to_json(info: types.StoppedInfo, allocator: std.mem.Allocator) !json.Value {
@@ -14,19 +15,37 @@ pub fn stopped_info_to_json(info: types.StoppedInfo, allocator: std.mem.Allocato
 
 pub fn find_port_for_pid(pid: u32) !u16 {
     const allocator = std.heap.page_allocator;
+
+    // macOS uses `lsof`, Linux uses `ss`.
+    const argv = if (comptime builtin.target.os.tag == .macos)
+        &.{ "lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-F", "pfn" }
+    else
+        &.{ "ss", "-tlnp" };
+
     const result = std.process.Child.run(.{
         .allocator = allocator,
-        .argv = &.{ "ss", "-tlnp" },
-    }) catch return error.SsFailed;
+        .argv = argv,
+    }) catch {
+        if (comptime builtin.target.os.tag == .macos) return error.LsofFailed;
+        return error.SsFailed;
+    };
     defer {
         allocator.free(result.stdout);
         allocator.free(result.stderr);
     }
 
-    const pid_str = try std.fmt.allocPrint(allocator, "pid={},", .{pid});
-    defer allocator.free(pid_str);
+    if (comptime builtin.target.os.tag == .macos) {
+        return find_port_macos(result.stdout, pid);
+    } else {
+        return find_port_linux(result.stdout, pid);
+    }
+}
 
-    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+fn find_port_linux(stdout: []const u8, pid: u32) !u16 {
+    const pid_str = try std.fmt.allocPrint(std.heap.page_allocator, "pid={},", .{pid});
+    defer std.heap.page_allocator.free(pid_str);
+
+    var lines = std.mem.splitScalar(u8, stdout, '\n');
     while (lines.next()) |line| {
         if (std.mem.indexOf(u8, line, pid_str) == null) continue;
         var tokens = std.mem.tokenizeAny(u8, line, " \t");
@@ -42,6 +61,31 @@ pub fn find_port_for_pid(pid: u32) !u16 {
         const colon = std.mem.lastIndexOfScalar(u8, addr, ':') orelse continue;
         const port_str = addr[colon + 1 ..];
         return std.fmt.parseInt(u16, port_str, 10);
+    }
+    return error.PortNotFound;
+}
+
+fn find_port_macos(stdout: []const u8, pid: u32) !u16 {
+    const pid_str = try std.fmt.allocPrint(std.heap.page_allocator, "{}", .{pid});
+    defer std.heap.page_allocator.free(pid_str);
+
+    // lsof -F output: pPID\nfFD\nnADDRESS\n  e.g. p12345\nf26\nn127.0.0.1:8080\n
+    var lines = std.mem.splitScalar(u8, stdout, '\n');
+    var found_pid = false;
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        if (line[0] == 'p' and std.mem.eql(u8, line[1..], pid_str)) {
+            found_pid = true;
+            continue;
+        }
+        if (found_pid and line.len > 1 and line[0] == 'n') {
+            const addr = line[1..];
+            const colon = std.mem.lastIndexOfScalar(u8, addr, ':') orelse continue;
+            const port_str = addr[colon + 1 ..];
+            if (port_str.len > 0 and port_str[0] != '*') {
+                return std.fmt.parseInt(u16, port_str, 10);
+            }
+        }
     }
     return error.PortNotFound;
 }

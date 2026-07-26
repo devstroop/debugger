@@ -16,6 +16,7 @@ pub const Error = error{
     NotConnected,
     PortDiscoveryFailed,
     SsFailed,
+    LsofFailed,
     PortNotFound,
     Timeout,
     DapRequestFailed,
