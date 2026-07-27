@@ -13,8 +13,21 @@ const json_to_i64 = util.json_to_i64;
 const find_port_for_pid = util.find_port_for_pid;
 const stopped_info_to_json = util.stopped_info_to_json;
 
-const dap_timeout_ms: u64 = 15_000;
-const poll_ms: u64 = 300;
+const dap_timeout_ms: u64 = 15_000; // timeout in ms (converted to ns at nanosecond call sites)
+const poll_ms: u64 = 300; // poll interval in ms
+
+const ManagedWriter = struct {
+    buf: *compat.ArrayList(u8),
+    pub fn writeAll(self: @This(), data: []const u8) !void {
+        try self.buf.appendSlice(data);
+    }
+    pub fn writeByte(self: @This(), byte: u8) !void {
+        try self.buf.append(byte);
+    }
+    pub fn print(self: @This(), comptime fmt: []const u8, args: anytype) !void {
+        try compat.bufPrint(self.buf, fmt, args);
+    }
+};
 
 const ManagedWriter = struct {
     buf: *compat.ArrayList(u8),
@@ -67,13 +80,16 @@ pub const DapClient = struct {
     pub fn connect(self: *DapClient) !void {
         self.logger.info("Spawning adapter...");
 
-        const child = try std.process.spawn(self.io, .{
+        var child = try std.process.spawn(self.io, .{
             .argv = &.{ self.adapter_path, "--port", "0" },
             .stdin = .ignore,
             .stdout = .ignore,
             .stderr = .pipe,
         });
-        const pid: u32 = @intCast(child.id orelse return error.InvalidSpawn);
+        const pid: u32 = @intCast(child.id orelse {
+            child.kill(self.io);
+            return error.InvalidSpawn;
+        });
         self.proc = child;
 
         self.logger.fmt(.info, "Spawned pid={}, discovering port...", .{pid});
@@ -335,7 +351,9 @@ pub const DapClient = struct {
     fn discover_port(self: *DapClient, pid: u32) !u16 {
         var elapsed: u64 = 0;
         while (elapsed < dap_timeout_ms) {
-            std.Io.sleep(self.io, .{ .nanoseconds = poll_ms * std.time.ns_per_ms }, .awake) catch {};
+            std.Io.sleep(self.io, .{ .nanoseconds = poll_ms * std.time.ns_per_ms }, .awake) catch |err| {
+                self.logger.fmt(.debug, "sleep failed: {s}", .{@errorName(err)});
+            };
             elapsed += poll_ms;
             if (find_port_for_pid(pid)) |port| return port else |_| continue;
         }
@@ -462,13 +480,17 @@ pub const DapClient = struct {
                     const prev_len = self.read_buf.items.len;
                     self.read_more() catch |read_err| {
                         if (read_err == error.Timeout) {
-                            std.Io.sleep(self.io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch {};
+                            std.Io.sleep(self.io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch |e| {
+                                self.logger.fmt(.debug, "sleep failed: {s}", .{@errorName(e)});
+                            };
                             continue;
                         }
                         return read_err;
                     };
                     if (self.read_buf.items.len == prev_len) {
-                        std.Io.sleep(self.io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch {};
+                        std.Io.sleep(self.io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch |e| {
+                            self.logger.fmt(.debug, "sleep failed: {s}", .{@errorName(e)});
+                        };
                     }
                     continue;
                 }
@@ -500,7 +522,9 @@ pub const DapClient = struct {
             }
 
             if (!std.mem.eql(u8, event_val.string, "stopped")) {
-                std.Io.sleep(self.io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch {};
+                std.Io.sleep(self.io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch |e| {
+                    self.logger.fmt(.debug, "sleep failed: {s}", .{@errorName(e)});
+                };
                 continue;
             }
 
