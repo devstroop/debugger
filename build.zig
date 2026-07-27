@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) void {
     });
     // Required on macOS for system symbols (fork, exit, getcwd, etc.)
     if (target.result.os.tag == .macos) {
-        exe.linkLibC();
+        exe.root_module.link_libc = true;
     }
 
     b.installArtifact(exe);
@@ -40,7 +40,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     if (target.result.os.tag == .macos) {
-        t.linkLibC();
+        t.root_module.link_libc = true;
     }
     const run_t = b.addRunArtifact(t);
     test_step.dependOn(&run_t.step);
