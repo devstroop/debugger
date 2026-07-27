@@ -29,19 +29,6 @@ const ManagedWriter = struct {
     }
 };
 
-const ManagedWriter = struct {
-    buf: *compat.ArrayList(u8),
-    pub fn writeAll(self: @This(), data: []const u8) !void {
-        try self.buf.appendSlice(data);
-    }
-    pub fn writeByte(self: @This(), byte: u8) !void {
-        try self.buf.append(byte);
-    }
-    pub fn print(self: @This(), comptime fmt: []const u8, args: anytype) !void {
-        try compat.bufPrint(self.buf, fmt, args);
-    }
-};
-
 pub const DapClient = struct {
     allocator: std.mem.Allocator,
     logger: *const log_mod.Logger,
