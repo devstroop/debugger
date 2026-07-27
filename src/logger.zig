@@ -1,6 +1,11 @@
 const std = @import("std");
 
-const stderr_fd = std.fs.File.stderr();
+fn writeToStderr(msg: []const u8) void {
+    var buf: [1024]u8 = undefined;
+    const stderr_lock = std.debug.lockStderr(&buf);
+    defer std.debug.unlockStderr();
+    stderr_lock.file_writer.interface.writeAll(msg) catch {};
+}
 
 pub const Level = enum(u3) {
     debug = 0,
@@ -25,14 +30,11 @@ pub const Logger = struct {
         return Logger{};
     }
 
-    fn writeToStderr(msg: []const u8) void {
-        _ = stderr_fd.write(msg) catch {};
-    }
-
     pub fn log(self: *const Logger, level: Level, msg: []const u8) void {
         if (@intFromEnum(level) < @intFromEnum(self.min_level)) return;
-        const ts = std.time.timestamp();
-        const line = std.fmt.allocPrint(std.heap.page_allocator, "[{}] [{s}] {s}\n", .{ ts, level.label(), msg }) catch return;
+        const ts = std.Io.Timestamp.now(std.Options.debug_io, .real);
+        const secs = @divTrunc(ts.nanoseconds, std.time.ns_per_s);
+        const line = std.fmt.allocPrint(std.heap.page_allocator, "[{}] [{s}] {s}\n", .{ secs, level.label(), msg }) catch return;
         defer std.heap.page_allocator.free(line);
         writeToStderr(line);
     }
