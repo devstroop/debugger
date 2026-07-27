@@ -1,6 +1,7 @@
 const std = @import("std");
 const json = std.json;
 const log_mod = @import("../logger.zig");
+const compat = @import("../compat.zig");
 
 pub fn Server(comptime Ctx: type) type {
     return struct {
@@ -30,16 +31,18 @@ pub fn Server(comptime Ctx: type) type {
         }
 
         pub fn run(self: *Self) !void {
-            const stdin = std.fs.File.stdin();
-            const stdout = std.fs.File.stdout();
+            const io = std.Options.debug_io;
+            const stdout_file = std.Io.File.stdout();
+            var stdout_buf: [0]u8 = undefined;
+            var stdout_file_writer = stdout_file.writer(io, &stdout_buf);
+            const stdout = &stdout_file_writer.interface;
 
             var buf: [16384]u8 = undefined;
-            var accumulated = std.ArrayList(u8){};
-            defer accumulated.deinit(self.allocator);
+            var accumulated = compat.ArrayList(u8).init(self.allocator);
             const max_message_size: usize = 1024 * 1024; // 1 MB
 
             while (true) {
-                const n = stdin.read(&buf) catch |err| {
+                const n = std.posix.read(std.posix.STDIN_FILENO, &buf) catch |err| {
                     self.logger.fmt(.err, "stdin read error: {s}", .{@errorName(err)});
                     return err;
                 };
@@ -56,7 +59,7 @@ pub fn Server(comptime Ctx: type) type {
                                 start = abs_pos + 1;
                                 continue;
                             }
-                            try accumulated.appendSlice(self.allocator, buf[start..abs_pos]);
+                            try accumulated.appendSlice(buf[start..abs_pos]);
                         }
                         const trimmed = std.mem.trim(u8, accumulated.items, " \r");
                         if (trimmed.len > 0) {
@@ -72,14 +75,14 @@ pub fn Server(comptime Ctx: type) type {
                             accumulated.clearRetainingCapacity();
                             break;
                         }
-                        try accumulated.appendSlice(self.allocator, buf[start..n]);
+                        try accumulated.appendSlice(buf[start..n]);
                         break;
                     }
                 }
             }
         }
 
-        fn dispatch(self: *Self, raw: []const u8, out: std.fs.File) !void {
+        fn dispatch(self: *Self, raw: []const u8, out: anytype) !void {
             // Arena for parsing — freed at end of dispatch
             var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
@@ -119,8 +122,7 @@ pub fn Server(comptime Ctx: type) type {
             }
         }
 
-        fn handleInitialize(self: *Self, id: ?json.Value, params: ?json.Value, out: std.fs.File) !void {
-            // Echo back the protocol version the client proposed
+        fn handleInitialize(self: *Self, id: ?json.Value, params: ?json.Value, out: anytype) !void {
             var protocol_version: []const u8 = "2024-11-05";
             if (params) |p| {
                 if (p.object.get("protocolVersion")) |pv| {
@@ -128,49 +130,47 @@ pub fn Server(comptime Ctx: type) type {
                 }
             }
 
-            var buf = std.ArrayList(u8){};
-            defer buf.deinit(self.allocator);
-            var w = buf.writer(self.allocator);
-            try w.writeAll("{\"result\":{");
-            try write_json_string(w, "protocolVersion"); try w.writeByte(':');
-            try write_json_string(w, protocol_version); try w.writeByte(',');
-            try w.writeAll("\"capabilities\":{\"tools\":{\"listChanged\":true}},");
-            try w.writeAll("\"serverInfo\":{\"name\":\"debugger\",\"version\":\"0.1.0\"},");
-            try w.writeAll("\"instructions\":\"Debug MCP server\"");
-            try w.writeAll("},\"jsonrpc\":\"2.0\",\"id\":");
-            try writeId(w, id);
-            try w.writeAll("}\n");
+            var buf = compat.ArrayList(u8).init(self.allocator);
+            defer buf.deinit();
+            try buf.appendSlice("{\"result\":{");
+            try write_json_string(&buf, "protocolVersion"); try buf.append(':');
+            try write_json_string(&buf, protocol_version); try buf.append(',');
+            try buf.appendSlice("\"capabilities\":{\"tools\":{\"listChanged\":true}},");
+            try buf.appendSlice("\"serverInfo\":{\"name\":\"debugger\",\"version\":\"0.1.0\"},");
+            try buf.appendSlice("\"instructions\":\"Debug MCP server\"");
+            try buf.appendSlice("},\"jsonrpc\":\"2.0\",\"id\":");
+            try writeId(&buf, id);
+            try buf.appendSlice("}\n");
             try out.writeAll(buf.items);
         }
 
-        fn handleToolsList(self: *Self, id: ?json.Value, out: std.fs.File) !void {
-            var buf = std.ArrayList(u8){};
-            defer buf.deinit(self.allocator);
-            var w = buf.writer(self.allocator);
+        fn handleToolsList(self: *Self, id: ?json.Value, out: anytype) !void {
+            var buf = compat.ArrayList(u8).init(self.allocator);
+            defer buf.deinit();
 
-            try w.writeAll("{\"result\":{\"tools\":[");
-            try w.writeAll("{\"name\":\"start_debugging\",\"description\":\"Start a VS Code debug session for a source file. Use when investigating bugs, failing tests, wrong/null variable values, or unexpected runtime behavior.\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{\"fileFullPath\":{\"type\":\"string\",\"description\":\"Full path to the source code file to debug\"},\"workingDirectory\":{\"type\":\"string\",\"description\":\"Working directory for the debug session\"}},\"required\":[\"fileFullPath\"],\"additionalProperties\":false}},");
-            try w.writeAll("{\"name\":\"stop_debugging\",\"description\":\"Stop the current debug session\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}},");
-            try w.writeAll("{\"name\":\"step_over\",\"description\":\"Execute the current line of code without diving into it.\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}},");
-            try w.writeAll("{\"name\":\"step_into\",\"description\":\"Dive into the current line of code.\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}},");
-            try w.writeAll("{\"name\":\"step_out\",\"description\":\"Step out of the current function\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}},");
-            try w.writeAll("{\"name\":\"pause\",\"description\":\"Interrupt a running program and stop at its current location\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}},");
-            try w.writeAll("{\"name\":\"continue_execution\",\"description\":\"Resume program execution until the next breakpoint is hit or the program completes\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}},");
-            try w.writeAll("{\"name\":\"restart_debugging\",\"description\":\"Restart the debug session from the beginning\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{\"fileFullPath\":{\"type\":\"string\",\"description\":\"Full path to the source code file to debug\"}},\"required\":[\"fileFullPath\"],\"additionalProperties\":false}},");
-            try w.writeAll("{\"name\":\"add_breakpoint\",\"description\":\"Set a breakpoint to pause execution at a critical line of code\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{\"fileFullPath\":{\"type\":\"string\",\"description\":\"Full path to the file\"},\"line\":{\"type\":\"integer\",\"description\":\"Line number (1-based) where the breakpoint should be set\"},\"condition\":{\"type\":\"string\",\"description\":\"Optional condition expression. Execution only pauses if this evaluates to true (e.g. \\\"i == 5\\\")\"}},\"required\":[\"fileFullPath\",\"line\"],\"additionalProperties\":false}},");
-            try w.writeAll("{\"name\":\"add_logpoint\",\"description\":\"Add a logpoint that logs a message instead of pausing execution\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{\"fileFullPath\":{\"type\":\"string\",\"description\":\"Full path to the file\"},\"line\":{\"type\":\"integer\",\"description\":\"Line number (1-based)\"},\"logMessage\":{\"type\":\"string\",\"description\":\"Message to log. Embed expressions in {curly braces} to interpolate runtime values, e.g. \\\"count={items.length}\\\"\"}},\"required\":[\"fileFullPath\",\"line\",\"logMessage\"],\"additionalProperties\":false}},");
-            try w.writeAll("{\"name\":\"remove_breakpoint\",\"description\":\"Remove a breakpoint by file and line\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{\"fileFullPath\":{\"type\":\"string\",\"description\":\"Full path to the file\"},\"line\":{\"type\":\"integer\",\"description\":\"Line number (1-based)\"}},\"required\":[\"fileFullPath\",\"line\"],\"additionalProperties\":false}},");
-            try w.writeAll("{\"name\":\"clear_all_breakpoints\",\"description\":\"Remove all breakpoints and logpoints\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}},");
-            try w.writeAll("{\"name\":\"list_breakpoints\",\"description\":\"View all currently set breakpoints across all files\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}},");
-            try w.writeAll("{\"name\":\"get_variables_values\",\"description\":\"Inspect variable values at the current execution point\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{\"scope\":{\"type\":\"string\",\"description\":\"Variable scope to inspect\",\"enum\":[\"local\",\"global\",\"all\"]}},\"required\":[],\"additionalProperties\":false}},");
-            try w.writeAll("{\"name\":\"evaluate_expression\",\"description\":\"Evaluate an expression in the current debug context\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{\"expression\":{\"type\":\"string\",\"description\":\"Expression to evaluate\"}},\"required\":[\"expression\"],\"additionalProperties\":false}}");
-            try w.writeAll("]},\"jsonrpc\":\"2.0\",\"id\":");
-            try writeId(w, id);
-            try w.writeAll("}\n");
+            try buf.appendSlice("{\"result\":{\"tools\":[");
+            try buf.appendSlice("{\"name\":\"start_debugging\",\"description\":\"Start a VS Code debug session for a source file. Use when investigating bugs, failing tests, wrong/null variable values, or unexpected runtime behavior.\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{\"fileFullPath\":{\"type\":\"string\",\"description\":\"Full path to the source code file to debug\"},\"workingDirectory\":{\"type\":\"string\",\"description\":\"Working directory for the debug session\"}},\"required\":[\"fileFullPath\"],\"additionalProperties\":false}},");
+            try buf.appendSlice("{\"name\":\"stop_debugging\",\"description\":\"Stop the current debug session\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}},");
+            try buf.appendSlice("{\"name\":\"step_over\",\"description\":\"Execute the current line of code without diving into it.\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}},");
+            try buf.appendSlice("{\"name\":\"step_into\",\"description\":\"Dive into the current line of code.\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}},");
+            try buf.appendSlice("{\"name\":\"step_out\",\"description\":\"Step out of the current function\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}},");
+            try buf.appendSlice("{\"name\":\"pause\",\"description\":\"Interrupt a running program and stop at its current location\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}},");
+            try buf.appendSlice("{\"name\":\"continue_execution\",\"description\":\"Resume program execution until the next breakpoint is hit or the program completes\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}},");
+            try buf.appendSlice("{\"name\":\"restart_debugging\",\"description\":\"Restart the debug session from the beginning\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{\"fileFullPath\":{\"type\":\"string\",\"description\":\"Full path to the source code file to debug\"}},\"required\":[\"fileFullPath\"],\"additionalProperties\":false}},");
+            try buf.appendSlice("{\"name\":\"add_breakpoint\",\"description\":\"Set a breakpoint to pause execution at a critical line of code\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{\"fileFullPath\":{\"type\":\"string\",\"description\":\"Full path to the file\"},\"line\":{\"type\":\"integer\",\"description\":\"Line number (1-based) where the breakpoint should be set\"},\"condition\":{\"type\":\"string\",\"description\":\"Optional condition expression. Execution only pauses if this evaluates to true (e.g. \\\"i == 5\\\")\"}},\"required\":[\"fileFullPath\",\"line\"],\"additionalProperties\":false}},");
+            try buf.appendSlice("{\"name\":\"add_logpoint\",\"description\":\"Add a logpoint that logs a message instead of pausing execution\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{\"fileFullPath\":{\"type\":\"string\",\"description\":\"Full path to the file\"},\"line\":{\"type\":\"integer\",\"description\":\"Line number (1-based)\"},\"logMessage\":{\"type\":\"string\",\"description\":\"Message to log. Embed expressions in {curly braces} to interpolate runtime values, e.g. \\\"count={items.length}\\\"\"}},\"required\":[\"fileFullPath\",\"line\",\"logMessage\"],\"additionalProperties\":false}},");
+            try buf.appendSlice("{\"name\":\"remove_breakpoint\",\"description\":\"Remove a breakpoint by file and line\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{\"fileFullPath\":{\"type\":\"string\",\"description\":\"Full path to the file\"},\"line\":{\"type\":\"integer\",\"description\":\"Line number (1-based)\"}},\"required\":[\"fileFullPath\",\"line\"],\"additionalProperties\":false}},");
+            try buf.appendSlice("{\"name\":\"clear_all_breakpoints\",\"description\":\"Remove all breakpoints and logpoints\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}},");
+            try buf.appendSlice("{\"name\":\"list_breakpoints\",\"description\":\"View all currently set breakpoints across all files\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}},");
+            try buf.appendSlice("{\"name\":\"get_variables_values\",\"description\":\"Inspect variable values at the current execution point\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{\"scope\":{\"type\":\"string\",\"description\":\"Variable scope to inspect\",\"enum\":[\"local\",\"global\",\"all\"]}},\"required\":[],\"additionalProperties\":false}},");
+            try buf.appendSlice("{\"name\":\"evaluate_expression\",\"description\":\"Evaluate an expression in the current debug context\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{\"expression\":{\"type\":\"string\",\"description\":\"Expression to evaluate\"}},\"required\":[\"expression\"],\"additionalProperties\":false}}");
+            try buf.appendSlice("]},\"jsonrpc\":\"2.0\",\"id\":");
+            try writeId(&buf, id);
+            try buf.appendSlice("}\n");
             try out.writeAll(buf.items);
         }
 
-        fn handleToolCall(self: *Self, id: ?json.Value, params: ?json.Value, out: std.fs.File) !void {
+        fn handleToolCall(self: *Self, id: ?json.Value, params: ?json.Value, out: anytype) !void {
             const p = params orelse {
                 try send_error_raw(out, id, -32602, "Missing params");
                 return;
@@ -203,107 +203,104 @@ pub fn Server(comptime Ctx: type) type {
 
 // ── Free-standing JSON response helpers (no self needed) ──────────
 
-fn send_result_raw(out: std.fs.File, id: ?json.Value, result: json.Value) !void {
-    var buf = std.ArrayList(u8){};
-    defer buf.deinit(std.heap.page_allocator);
-    var w = buf.writer(std.heap.page_allocator);
-    try w.writeAll("{\"result\":");
-    try write_json_value(w, result);
-    try w.writeAll(",\"jsonrpc\":\"2.0\",\"id\":");
-    try writeId(w, id);
-    try w.writeAll("}\n");
+fn send_result_raw(out: anytype, id: ?json.Value, result: json.Value) !void {
+    var buf = compat.ArrayList(u8).init(std.heap.page_allocator);
+    defer buf.deinit();
+    try buf.appendSlice("{\"result\":");
+    try write_json_value(&buf, result);
+    try buf.appendSlice(",\"jsonrpc\":\"2.0\",\"id\":");
+    try writeId(&buf, id);
+    try buf.appendSlice("}\n");
     try out.writeAll(buf.items);
 }
 
-fn send_error_raw(out: std.fs.File, id: ?json.Value, code: i32, msg: []const u8) !void {
-    var buf = std.ArrayList(u8){};
-    defer buf.deinit(std.heap.page_allocator);
-    var w = buf.writer(std.heap.page_allocator);
-    try w.writeAll("{\"error\":{\"code\":");
-    try w.print("{}", .{code});
-    try w.writeAll(",\"message\":");
-    try write_json_string(w, msg);
-    try w.writeAll("},\"jsonrpc\":\"2.0\",\"id\":");
-    try writeId(w, id);
-    try w.writeAll("}\n");
+fn send_error_raw(out: anytype, id: ?json.Value, code: i32, msg: []const u8) !void {
+    var buf = compat.ArrayList(u8).init(std.heap.page_allocator);
+    defer buf.deinit();
+    try buf.appendSlice("{\"error\":{\"code\":");
+    try compat.bufPrint(&buf, "{}", .{code});
+    try buf.appendSlice(",\"message\":");
+    try write_json_string(&buf, msg);
+    try buf.appendSlice("},\"jsonrpc\":\"2.0\",\"id\":");
+    try writeId(&buf, id);
+    try buf.appendSlice("}\n");
     try out.writeAll(buf.items);
 }
 
-fn writeId(w: anytype, id_val: ?json.Value) !void {
+fn writeId(buf: *compat.ArrayList(u8), id_val: ?json.Value) !void {
     if (id_val) |id| {
         switch (id) {
-            .integer => |n| try w.print("{}", .{n}),
-            .float => |f| try w.print("{}", .{@as(i64, @intFromFloat(f))}),
+            .integer => |n| try compat.bufPrint(buf, "{}", .{n}),
+            .float => |f| try compat.bufPrint(buf, "{}", .{@as(i64, @intFromFloat(f))}),
             .string => |s| {
-                try w.writeByte('"');
-                try w.writeAll(s);
-                try w.writeByte('"');
+                try buf.append('"');
+                try buf.appendSlice(s);
+                try buf.append('"');
             },
-            else => try w.writeAll("null"),
+            else => try buf.appendSlice("null"),
         }
     } else {
-        try w.writeAll("null");
+        try buf.appendSlice("null");
     }
 }
 
-fn write_json_string(w: anytype, s: []const u8) !void {
-    try w.writeByte('"');
+fn write_json_string(buf: *compat.ArrayList(u8), s: []const u8) !void {
+    try buf.append('"');
     for (s) |c| {
         switch (c) {
-            '"' => try w.writeAll("\\\""),
-            '\\' => try w.writeAll("\\\\"),
-            '\n' => try w.writeAll("\\n"),
-            '\r' => try w.writeAll("\\r"),
-            '\t' => try w.writeAll("\\t"),
+            '"' => try buf.appendSlice("\\\""),
+            '\\' => try buf.appendSlice("\\\\"),
+            '\n' => try buf.appendSlice("\\n"),
+            '\r' => try buf.appendSlice("\\r"),
+            '\t' => try buf.appendSlice("\\t"),
             0...7, 0xb, 0xc, 0xe...0x1f => {
-                try w.writeAll("\\u00");
-                try w.print("{x:0>2}", .{@as(u8, c)});
+                try buf.appendSlice("\\u00");
+                try compat.bufPrint(buf, "{x:0>2}", .{@as(u8, c)});
             },
-            else => try w.writeByte(c),
+            else => try buf.append(c),
         }
     }
-    try w.writeByte('"');
+    try buf.append('"');
 }
 
-fn write_json_value(w: anytype, val: json.Value) !void {
+fn write_json_value(buf: *compat.ArrayList(u8), val: json.Value) !void {
     switch (val) {
-        .null => try w.writeAll("null"),
-        .bool => |b| try w.writeAll(if (b) "true" else "false"),
-        .integer => |n| try w.print("{}", .{n}),
-        .float => |f| try w.print("{}", .{f}),
-        .number_string => |s| try write_json_string(w, s),
-        .string => |s| try write_json_string(w, s),
+        .null => try buf.appendSlice("null"),
+        .bool => |b| try buf.appendSlice(if (b) "true" else "false"),
+        .integer => |n| try compat.bufPrint(buf, "{}", .{n}),
+        .float => |f| try compat.bufPrint(buf, "{}", .{f}),
+        .number_string => |s| try write_json_string(buf, s),
+        .string => |s| try write_json_string(buf, s),
         .array => |arr| {
-            try w.writeByte('[');
+            try buf.append('[');
             for (arr.items, 0..) |item, i| {
-                if (i > 0) try w.writeByte(',');
-                try write_json_value(w, item);
+                if (i > 0) try buf.append(',');
+                try write_json_value(buf, item);
             }
-            try w.writeByte(']');
+            try buf.append(']');
         },
         .object => |obj| {
-            try w.writeByte('{');
+            try buf.append('{');
             var it = obj.iterator();
             var first = true;
             while (it.next()) |entry| {
-                if (!first) try w.writeByte(',');
+                if (!first) try buf.append(',');
                 first = false;
-                try write_json_string(w, entry.key_ptr.*);
-                try w.writeByte(':');
-                try write_json_value(w, entry.value_ptr.*);
+                try write_json_string(buf, entry.key_ptr.*);
+                try buf.append(':');
+                try write_json_value(buf, entry.value_ptr.*);
             }
-            try w.writeByte('}');
+            try buf.append('}');
         },
     }
 }
 
-fn send_pong(out: std.fs.File, id: ?json.Value) !void {
-    var buf = std.ArrayList(u8){};
-    defer buf.deinit(std.heap.page_allocator);
-    var w = buf.writer(std.heap.page_allocator);
-    try w.writeAll("{\"result\":{},\"jsonrpc\":\"2.0\",\"id\":");
-    try writeId(w, id);
-    try w.writeAll("}\n");
+fn send_pong(out: anytype, id: ?json.Value) !void {
+    var buf = compat.ArrayList(u8).init(std.heap.page_allocator);
+    defer buf.deinit();
+    try buf.appendSlice("{\"result\":{},\"jsonrpc\":\"2.0\",\"id\":");
+    try writeId(&buf, id);
+    try buf.appendSlice("}\n");
     try out.writeAll(buf.items);
 }
 
@@ -315,7 +312,7 @@ fn is_notification(method: []const u8) bool {
 fn extract_id(raw: []const u8) ?json.Value {
     if (std.mem.indexOf(u8, raw, "\"id\"")) |id_pos| {
         const rest = raw[id_pos + 4 ..];
-        const trimmed = std.mem.trimLeft(u8, rest, " \t:");
+        const trimmed = std.mem.trim(u8, rest, " \t:");
         if (trimmed.len > 0) {
             if (trimmed[0] == '"') {
                 const end = std.mem.indexOfScalar(u8, trimmed[1..], '"') orelse return null;
