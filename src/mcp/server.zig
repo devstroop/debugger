@@ -312,7 +312,7 @@ fn is_notification(method: []const u8) bool {
 fn extract_id(raw: []const u8) ?json.Value {
     if (std.mem.indexOf(u8, raw, "\"id\"")) |id_pos| {
         const rest = raw[id_pos + 4 ..];
-        const trimmed = std.mem.trim(u8, rest, " \t:");
+        const trimmed = std.mem.trimStart(u8, rest, " \t:");
         if (trimmed.len > 0) {
             if (trimmed[0] == '"') {
                 const end = std.mem.indexOfScalar(u8, trimmed[1..], '"') orelse return null;
