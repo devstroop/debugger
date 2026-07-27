@@ -4,24 +4,30 @@ const handler_mod = @import("mcp/handler.zig");
 const log_mod = @import("logger.zig");
 
 pub fn main() !void {
-    // Write startup marker to stderr so opencode can confirm the binary launched
-    const stderr_file = std.fs.File.stderr();
-    stderr_file.writeAll("debugger: starting\n") catch {};
+    var start_buf: [64]u8 = undefined;
+    const start_stderr = std.debug.lockStderr(&start_buf);
+    defer std.debug.unlockStderr();
+    start_stderr.file_writer.interface.writeAll("debugger: starting\n") catch {};
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = std.heap.smp_allocator;
 
     var logger = log_mod.Logger.init();
-    if (std.process.getEnvVarOwned(allocator, "DEBUGGERMCP_LOG")) |level_str| {
-        defer allocator.free(level_str);
-        if (std.ascii.eqlIgnoreCase(level_str, "debug")) logger.min_level = .debug;
-        if (std.ascii.eqlIgnoreCase(level_str, "warn")) logger.min_level = .warn;
-        if (std.ascii.eqlIgnoreCase(level_str, "error")) logger.min_level = .err;
-    } else |_| {}
+    {
+        var env_map = std.process.Environ.Map.init(allocator);
+        defer env_map.deinit();
+        if (env_map.get("DEBUGGERMCP_LOG")) |level_str| {
+            if (std.ascii.eqlIgnoreCase(level_str, "debug")) logger.min_level = .debug;
+            if (std.ascii.eqlIgnoreCase(level_str, "warn")) logger.min_level = .warn;
+            if (std.ascii.eqlIgnoreCase(level_str, "error")) logger.min_level = .err;
+        }
+    }
 
-    const adapter_path = std.process.getEnvVarOwned(allocator, "DEBUGGERMCP_ADAPTER") catch
-        "/tmp/codelldb-extract/extension/adapter/codelldb";
+    const adapter_path = blk: {
+        var env_map = std.process.Environ.Map.init(allocator);
+        defer env_map.deinit();
+        const val = env_map.get("DEBUGGERMCP_ADAPTER");
+        break :blk if (val) |v| try allocator.dupe(u8, v) else "/tmp/codelldb-extract/extension/adapter/codelldb";
+    };
 
     var handler = handler_mod.Handler.init(allocator, &logger, adapter_path);
     defer handler.deinit();
@@ -29,7 +35,6 @@ pub fn main() !void {
     var server = mcp_server.Server(handler_mod.Handler).init(allocator, &logger, &handler);
     defer server.deinit();
 
-    // Register tools — each handler is a free function that takes *Handler as first arg
     try server.registerTool("start_debugging", handler_mod.start_debugging);
     try server.registerTool("stop_debugging", handler_mod.stop_debugging);
     try server.registerTool("step_over", handler_mod.step_over);

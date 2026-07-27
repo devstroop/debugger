@@ -4,6 +4,7 @@ const DapClient = @import("../dap/client.zig").DapClient;
 const DapBreakpoint = @import("../dap/types.zig").DapBreakpoint;
 const log_mod = @import("../logger.zig");
 const mcp_types = @import("types.zig");
+const compat = @import("../compat.zig");
 
 pub const Breakpoint = struct {
     file_path: []const u8,
@@ -18,15 +19,15 @@ pub const Handler = struct {
     logger: *const log_mod.Logger,
     adapter_path: []const u8,
     client: ?*DapClient = null,
-    breakpoints: std.ArrayList(Breakpoint) = std.ArrayList(Breakpoint){},
+    breakpoints: compat.ArrayList(Breakpoint),
 
     pub fn init(allocator: std.mem.Allocator, logger: *const log_mod.Logger, adapter_path: []const u8) Handler {
-        return .{ .allocator = allocator, .logger = logger, .adapter_path = adapter_path };
+        return .{ .allocator = allocator, .logger = logger, .adapter_path = adapter_path, .breakpoints = compat.ArrayList(Breakpoint).init(allocator) };
     }
 
     pub fn deinit(self: *Handler) void {
         self.stopSession();
-        self.breakpoints.deinit(self.allocator);
+        self.breakpoints.deinit();
     }
 
     fn free_breakpoint(self: *Handler, bp: Breakpoint) void {
@@ -134,15 +135,14 @@ pub fn continue_exec(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Value
 
 fn stopped_to_text_result(stopped: json.Value, allocator: std.mem.Allocator) !json.Value {
     const reason = stopped.object.get("reason") orelse return mcp_types.text_result(allocator, "");
-    var buf = std.ArrayList(u8){};
-    defer buf.deinit(allocator);
-    var w = buf.writer(allocator);
-    try w.writeAll("Stopped: ");
-    try w.writeAll(reason.string);
+    var buf = compat.ArrayList(u8).init(allocator);
+    defer buf.deinit();
+    try buf.appendSlice("Stopped: ");
+    try buf.appendSlice(reason.string);
     if (stopped.object.get("description")) |d| {
-        try w.writeAll(" (");
-        try w.writeAll(d.string);
-        try w.writeByte(')');
+        try buf.appendSlice(" (");
+        try buf.appendSlice(d.string);
+        try buf.append(')');
     }
     const tid = if (stopped.object.get("threadId")) |t| t.integer else 0;
     const is_exit = std.mem.eql(u8, reason.string, "exited") or std.mem.eql(u8, reason.string, "terminated");
@@ -193,7 +193,7 @@ pub fn add_breakpoint(ctx: *Handler, allocator: std.mem.Allocator, args: ?json.V
             .condition = owned_cond,
             .log_message = owned_msg,
         };
-        ctx.breakpoints.append(ctx.allocator, bp) catch |err| {
+        ctx.breakpoints.append(bp) catch |err| {
             ctx.free_breakpoint(bp);
             return err;
         };
@@ -228,13 +228,12 @@ pub fn remove_breakpoint(ctx: *Handler, allocator: std.mem.Allocator, args: ?jso
         break :blk @intCast(lv_i64);
     } else return mcp_types.error_result(allocator, "Missing required parameter: line");
 
-    // Build the filtered DAP breakpoint list (everything except matches)
-    var dap_bps = std.ArrayList(DapBreakpoint){};
-    defer dap_bps.deinit(ctx.allocator);
+    var dap_bps = compat.ArrayList(DapBreakpoint).init(ctx.allocator);
+    defer dap_bps.deinit();
     for (ctx.breakpoints.items) |bp| {
         const is_match = std.mem.eql(u8, bp.file_path, file_path.string) and bp.line == line;
         if (!is_match and std.mem.eql(u8, bp.file_path, file_path.string)) {
-            try dap_bps.append(ctx.allocator, .{
+            try dap_bps.append(.{
                 .line = bp.line,
                 .condition = bp.condition,
                 .log_message = bp.log_message,
@@ -267,18 +266,17 @@ pub fn clear_all_breakpoints(ctx: *Handler, allocator: std.mem.Allocator, _: ?js
     // Send empty set_breakpoints for each tracked file BEFORE freeing
     const c = try ctx.getClient();
 
-    // Collect unique file paths into owned strings first
-    var files = std.ArrayList([]const u8){};
+    var files = compat.ArrayList([]const u8).init(allocator);
     defer {
         for (files.items) |f| allocator.free(f);
-        files.deinit(allocator);
+        files.deinit();
     }
     for (ctx.breakpoints.items) |bp| {
         var found = false;
         for (files.items) |f| {
             if (std.mem.eql(u8, f, bp.file_path)) { found = true; break; }
         }
-        if (!found) try files.append(allocator, try allocator.dupe(u8, bp.file_path));
+        if (!found) try files.append(try allocator.dupe(u8, bp.file_path));
     }
 
     // Clear remote first, then local (on error, local list is preserved)
@@ -303,20 +301,19 @@ pub fn clear_all_breakpoints(ctx: *Handler, allocator: std.mem.Allocator, _: ?js
 pub fn list_breakpoints(ctx: *Handler, allocator: std.mem.Allocator, _: ?json.Value) !json.Value {
     if (ctx.breakpoints.items.len == 0) return mcp_types.text_result(allocator, "No breakpoints set");
 
-    var buf = std.ArrayList(u8){};
-    defer buf.deinit(allocator);
-    var w = buf.writer(allocator);
+    var buf = compat.ArrayList(u8).init(allocator);
+    defer buf.deinit();
     for (ctx.breakpoints.items, 0..) |bp, i| {
-        if (i > 0) try w.writeByte('\n');
-        try w.writeAll(if (bp.log_message != null) "Logpoint" else "Breakpoint");
-        try w.writeAll(": ");
-        try w.writeAll(bp.file_path);
-        try w.writeAll(":");
-        try w.print("{}", .{bp.line});
+        if (i > 0) try buf.append('\n');
+        try buf.appendSlice(if (bp.log_message != null) "Logpoint" else "Breakpoint");
+        try buf.appendSlice(": ");
+        try buf.appendSlice(bp.file_path);
+        try buf.appendSlice(":");
+        try compat.bufPrint(&buf, "{}", .{bp.line});
         if (bp.condition) |c| {
-            try w.writeAll(" (condition: ");
-            try w.writeAll(c);
-            try w.writeByte(')');
+            try buf.appendSlice(" (condition: ");
+            try buf.appendSlice(c);
+            try buf.append(')');
         }
     }
     return mcp_types.text_result(allocator, buf.items);
@@ -368,17 +365,16 @@ pub fn get_variables(ctx: *Handler, allocator: std.mem.Allocator, args: ?json.Va
     const vars_body = vars_resp.object.get("body") orelse return mcp_types.error_result(allocator, "No variables body");
     const vars_arr = vars_body.object.get("variables") orelse return mcp_types.error_result(allocator, "No variables");
 
-    var buf = std.ArrayList(u8){};
-    defer buf.deinit(allocator);
-    var w = buf.writer(allocator);
+    var buf = compat.ArrayList(u8).init(allocator);
+    defer buf.deinit();
 
     for (vars_arr.array.items, 0..) |v, i| {
-        if (i > 0) try w.writeAll("\n");
+        if (i > 0) try buf.appendSlice("\n");
         const name = v.object.get("name") orelse continue;
         const value = v.object.get("value") orelse continue;
-        try w.writeAll(name.string);
-        try w.writeAll(" = ");
-        try w.writeAll(value.string);
+        try buf.appendSlice(name.string);
+        try buf.appendSlice(" = ");
+        try buf.appendSlice(value.string);
     }
 
     if (buf.items.len == 0) return mcp_types.text_result(allocator, "No variables");
@@ -454,15 +450,14 @@ fn sync_breakpoints(ctx: *Handler) !void {
     const c = ctx.client orelse return;
     const all_bps = ctx.breakpoints.items;
 
-    // Collect unique file paths
-    var files = std.ArrayList([]const u8){};
-    defer files.deinit(ctx.allocator);
+    var files = compat.ArrayList([]const u8).init(ctx.allocator);
+    defer files.deinit();
     for (all_bps) |bp| {
         var found = false;
         for (files.items) |f| {
             if (std.mem.eql(u8, f, bp.file_path)) { found = true; break; }
         }
-        if (!found) try files.append(ctx.allocator, bp.file_path);
+        if (!found) try files.append(bp.file_path);
     }
 
     // For each unique file, send all breakpoints for that file
