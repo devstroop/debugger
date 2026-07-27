@@ -25,4 +25,5 @@ pub const Error = error{
     ConnectionClosed,
     ReadError,
     MissingParams,
+    InvalidSpawn,
 };

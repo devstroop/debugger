@@ -1,5 +1,5 @@
 const std = @import("std");
-const net = std.net;
+const compat = @import("../compat.zig");
 const json = std.json;
 const log_mod = @import("../logger.zig");
 const types = @import("types.zig");
@@ -16,13 +16,27 @@ const stopped_info_to_json = util.stopped_info_to_json;
 const dap_timeout_ms: u64 = 15_000;
 const poll_ms: u64 = 300;
 
+const ManagedWriter = struct {
+    buf: *compat.ArrayList(u8),
+    pub fn writeAll(self: @This(), data: []const u8) !void {
+        try self.buf.appendSlice(data);
+    }
+    pub fn writeByte(self: @This(), byte: u8) !void {
+        try self.buf.append(byte);
+    }
+    pub fn print(self: @This(), comptime fmt: []const u8, args: anytype) !void {
+        try compat.bufPrint(self.buf, fmt, args);
+    }
+};
+
 pub const DapClient = struct {
     allocator: std.mem.Allocator,
     logger: *const log_mod.Logger,
     adapter_path: []const u8,
+    io: std.Io,
 
     proc: ?std.process.Child = null,
-    conn: ?net.Stream = null,
+    conn: ?std.Io.net.Stream = null,
     seq: i64 = 1,
     launch_seq: i64 = 0,
     thread_id: i64 = -1,
@@ -30,7 +44,7 @@ pub const DapClient = struct {
     pending_stopped_reason: ?[]const u8 = null,
     pending_stopped_description: ?[]const u8 = null,
     pending_stopped_thread: i64 = 0,
-    read_buf: std.ArrayList(u8),
+    read_buf: compat.ArrayList(u8),
     parse_arena: std.heap.ArenaAllocator,
 
     pub fn init(allocator: std.mem.Allocator, logger: *const log_mod.Logger, adapter_path: []const u8) DapClient {
@@ -38,41 +52,45 @@ pub const DapClient = struct {
             .allocator = allocator,
             .logger = logger,
             .adapter_path = adapter_path,
-            .read_buf = std.ArrayList(u8){},
+            .io = std.Options.debug_io,
+            .read_buf = compat.ArrayList(u8).init(allocator),
             .parse_arena = std.heap.ArenaAllocator.init(allocator),
         };
     }
 
     pub fn deinit(self: *DapClient) void {
         self.disconnect();
-        self.read_buf.deinit(self.allocator);
+        self.read_buf.deinit();
         self.parse_arena.deinit();
     }
 
     pub fn connect(self: *DapClient) !void {
         self.logger.info("Spawning adapter...");
 
-        const argv = &.{ self.adapter_path, "--port", "0" };
-        var child = std.process.Child.init(argv, self.allocator);
-        child.stdin_behavior = .Ignore;
-        child.stdout_behavior = .Ignore;
-        child.stderr_behavior = .Pipe;
-        try child.spawn();
+        const child = try std.process.spawn(self.io, .{
+            .argv = &.{ self.adapter_path, "--port", "0" },
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .pipe,
+        });
+        const pid: u32 = @intCast(child.id orelse return error.InvalidSpawn);
         self.proc = child;
-        const pid: u32 = @intCast(child.id);
 
         self.logger.fmt(.info, "Spawned pid={}, discovering port...", .{pid});
 
         const port = self.discover_port(pid) catch |err| {
-            _ = child.kill() catch unreachable;
+            if (self.proc) |*p| p.kill(self.io);
             self.proc = null;
             return err;
         };
 
         self.logger.fmt(.info, "Discovered port {}, connecting...", .{port});
 
-        const conn = net.tcpConnectToHost(self.allocator, "127.0.0.1", port) catch |err| {
-            _ = child.kill() catch unreachable;
+        var addr_buf: [32]u8 = undefined;
+        const addr_str = try std.fmt.bufPrint(&addr_buf, "127.0.0.1:{d}", .{port});
+        const address = try std.Io.net.IpAddress.parseLiteral(addr_str);
+        const conn = std.Io.net.IpAddress.connect(&address, self.io, .{ .mode = .stream }) catch |err| {
+            if (self.proc) |*p| p.kill(self.io);
             self.proc = null;
             return err;
         };
@@ -82,11 +100,11 @@ pub const DapClient = struct {
 
     pub fn disconnect(self: *DapClient) void {
         if (self.conn) |c| {
-            c.close();
+            c.close(self.io);
             self.conn = null;
         }
         if (self.proc) |*child| {
-            _ = child.kill() catch unreachable;
+            child.kill(self.io);
             self.proc = null;
         }
     }
@@ -98,24 +116,24 @@ pub const DapClient = struct {
     }
 
     pub fn launch(self: *DapClient, program: []const u8, cwd: []const u8) !void {
-        var args = std.ArrayList(u8){};
-        defer args.deinit(self.allocator);
-        var w = args.writer(self.allocator);
-        try w.writeAll("{\"program\":\"");
-        try write_json_string(w, program);
-        try w.writeAll("\",\"cwd\":\"");
-        try write_json_string(w, cwd);
-        try w.writeAll("\",\"type\":\"lldb\",\"request\":\"launch\",\"stopOnEntry\":false}");
+        var args = compat.ArrayList(u8).init(self.allocator);
+        defer args.deinit();
+        try args.appendSlice("{\"program\":\"");
+        try write_json_string(ManagedWriter{ .buf = &args }, program);
+        try args.appendSlice("\",\"cwd\":\"");
+        try write_json_string(ManagedWriter{ .buf = &args }, cwd);
+        try args.appendSlice("\",\"type\":\"lldb\",\"request\":\"launch\",\"stopOnEntry\":false}");
 
         const seq = self.seq;
         self.seq += 1;
         self.launch_seq = seq;
         try self.write_frame("launch", seq, args.items);
 
-        const start = std.time.milliTimestamp();
+        const start = std.Io.Clock.Timestamp.now(self.io, .awake);
         while (true) {
-            const elapsed = @as(u64, @intCast(std.time.milliTimestamp() - start));
-            if (elapsed > dap_timeout_ms) return error.Timeout;
+            const now = std.Io.Clock.Timestamp.now(self.io, .awake);
+            const elapsed = start.durationTo(now).raw.nanoseconds;
+            if (elapsed > dap_timeout_ms * std.time.ns_per_ms) return error.Timeout;
 
             if (self.try_parse_message()) |msg| {
                 const root = msg.object;
@@ -146,45 +164,42 @@ pub const DapClient = struct {
     }
 
     pub fn set_breakpoints(self: *DapClient, file_path: []const u8, breakpoints: []const DapBreakpoint) !json.Value {
-        var args = std.ArrayList(u8){};
-        defer args.deinit(self.allocator);
-        var w = args.writer(self.allocator);
-
-        try w.writeAll("{\"source\":{\"path\":\"");
-        try write_json_string(w, file_path);
-        try w.writeAll("\"},\"breakpoints\":[");
+        var args = compat.ArrayList(u8).init(self.allocator);
+        defer args.deinit();
+        try args.appendSlice("{\"source\":{\"path\":\"");
+        try write_json_string(ManagedWriter{ .buf = &args }, file_path);
+        try args.appendSlice("\"},\"breakpoints\":[");
         for (breakpoints, 0..) |bp, i| {
-            if (i > 0) try w.writeByte(',');
-            try w.writeAll("{\"line\":");
-            try w.print("{}", .{bp.line});
+            if (i > 0) try args.append(',');
+            try args.appendSlice("{\"line\":");
+            try compat.bufPrint(&args, "{}", .{bp.line});
             if (bp.condition) |c| {
-                try w.writeAll(",\"condition\":\"");
-                try write_json_string(w, c);
-                try w.writeAll("\"");
+                try args.appendSlice(",\"condition\":\"");
+                try write_json_string(ManagedWriter{ .buf = &args }, c);
+                try args.appendSlice("\"");
             }
             if (bp.log_message) |lm| {
-                try w.writeAll(",\"logMessage\":\"");
-                try write_json_string(w, lm);
-                try w.writeAll("\"");
+                try args.appendSlice(",\"logMessage\":\"");
+                try write_json_string(ManagedWriter{ .buf = &args }, lm);
+                try args.appendSlice("\"");
             }
-            try w.writeAll("}");
+            try args.appendSlice("}");
         }
-        try w.writeAll("]}");
+        try args.appendSlice("]}");
         return self.send("setBreakpoints", args.items);
     }
 
     pub fn set_function_breakpoints(self: *DapClient, names: []const []const u8) !json.Value {
-        var args = std.ArrayList(u8){};
-        defer args.deinit(self.allocator);
-        var w = args.writer(self.allocator);
-        try w.writeAll("{\"breakpoints\":[");
+        var args = compat.ArrayList(u8).init(self.allocator);
+        defer args.deinit();
+        try args.appendSlice("{\"breakpoints\":[");
         for (names, 0..) |name, i| {
-            if (i > 0) try w.writeByte(',');
-            try w.writeAll("{\"name\":\"");
-            try write_json_string(w, name);
-            try w.writeAll("\"}");
+            if (i > 0) try args.append(',');
+            try args.appendSlice("{\"name\":\"");
+            try write_json_string(ManagedWriter{ .buf = &args }, name);
+            try args.appendSlice("\"}");
         }
-        try w.writeAll("]}");
+        try args.appendSlice("]}");
         return self.send("setFunctionBreakpoints", args.items);
     }
 
@@ -208,10 +223,9 @@ pub const DapClient = struct {
         self.clear_pending_stopped();
         _ = self.process_pending_events() catch {};
         if (self.thread_id < 0) return error.InvalidThreadId;
-        var args = std.ArrayList(u8){};
-        defer args.deinit(self.allocator);
-        var w = args.writer(self.allocator);
-        try w.print("{{\"threadId\":{}}}", .{self.thread_id});
+        var args = compat.ArrayList(u8).init(self.allocator);
+        defer args.deinit();
+        try compat.bufPrint(&args, "{{\"threadId\":{}}}", .{self.thread_id});
         const resp = try self.send("next", args.items);
         try check_success(resp);
         const stopped = try self.wait_for_stopped();
@@ -222,10 +236,9 @@ pub const DapClient = struct {
         self.clear_pending_stopped();
         _ = self.process_pending_events() catch {};
         if (self.thread_id < 0) return error.InvalidThreadId;
-        var args = std.ArrayList(u8){};
-        defer args.deinit(self.allocator);
-        var w = args.writer(self.allocator);
-        try w.print("{{\"threadId\":{}}}", .{self.thread_id});
+        var args = compat.ArrayList(u8).init(self.allocator);
+        defer args.deinit();
+        try compat.bufPrint(&args, "{{\"threadId\":{}}}", .{self.thread_id});
         const resp = try self.send("stepIn", args.items);
         try check_success(resp);
         const stopped = try self.wait_for_stopped();
@@ -236,10 +249,9 @@ pub const DapClient = struct {
         self.clear_pending_stopped();
         _ = self.process_pending_events() catch {};
         if (self.thread_id < 0) return error.InvalidThreadId;
-        var args = std.ArrayList(u8){};
-        defer args.deinit(self.allocator);
-        var w = args.writer(self.allocator);
-        try w.print("{{\"threadId\":{}}}", .{self.thread_id});
+        var args = compat.ArrayList(u8).init(self.allocator);
+        defer args.deinit();
+        try compat.bufPrint(&args, "{{\"threadId\":{}}}", .{self.thread_id});
         const resp = try self.send("stepOut", args.items);
         try check_success(resp);
         const stopped = try self.wait_for_stopped();
@@ -250,10 +262,9 @@ pub const DapClient = struct {
         self.clear_pending_stopped();
         _ = self.process_pending_events() catch {};
         if (self.thread_id < 0) return error.InvalidThreadId;
-        var args = std.ArrayList(u8){};
-        defer args.deinit(self.allocator);
-        var w = args.writer(self.allocator);
-        try w.print("{{\"threadId\":{}}}", .{self.thread_id});
+        var args = compat.ArrayList(u8).init(self.allocator);
+        defer args.deinit();
+        try compat.bufPrint(&args, "{{\"threadId\":{}}}", .{self.thread_id});
         const resp = try self.send("pause", args.items);
         try check_success(resp);
         const stopped = try self.wait_for_stopped();
@@ -270,10 +281,9 @@ pub const DapClient = struct {
             return stopped_info_to_json(stopped, self.allocator);
         }
         if (self.thread_id < 0) return error.InvalidThreadId;
-        var args = std.ArrayList(u8){};
-        defer args.deinit(self.allocator);
-        var w = args.writer(self.allocator);
-        try w.print("{{\"threadId\":{}}}", .{self.thread_id});
+        var args = compat.ArrayList(u8).init(self.allocator);
+        defer args.deinit();
+        try compat.bufPrint(&args, "{{\"threadId\":{}}}", .{self.thread_id});
         const resp = try self.send("continue", args.items);
         try check_success(resp);
         const stopped = try self.wait_for_stopped();
@@ -284,52 +294,48 @@ pub const DapClient = struct {
         self.clear_pending_stopped();
         _ = self.process_pending_events() catch {};
         if (self.thread_id < 0) return error.InvalidThreadId;
-        var args = std.ArrayList(u8){};
-        defer args.deinit(self.allocator);
-        var w = args.writer(self.allocator);
-        try w.print("{{\"threadId\":{},\"startFrame\":{},\"levels\":{}}}", .{ self.thread_id, start_frame, levels });
+        var args = compat.ArrayList(u8).init(self.allocator);
+        defer args.deinit();
+        try compat.bufPrint(&args, "{{\"threadId\":{},\"startFrame\":{},\"levels\":{}}}", .{ self.thread_id, start_frame, levels });
         return self.send("stackTrace", args.items);
     }
 
     pub fn scopes(self: *DapClient, frame_id: i64) !json.Value {
-        var args = std.ArrayList(u8){};
-        defer args.deinit(self.allocator);
-        var w = args.writer(self.allocator);
-        try w.print("{{\"frameId\":{}}}", .{frame_id});
+        var args = compat.ArrayList(u8).init(self.allocator);
+        defer args.deinit();
+        try compat.bufPrint(&args, "{{\"frameId\":{}}}", .{frame_id});
         return self.send("scopes", args.items);
     }
 
     pub fn variables(self: *DapClient, var_ref: i64) !json.Value {
-        var args = std.ArrayList(u8){};
-        defer args.deinit(self.allocator);
-        var w = args.writer(self.allocator);
-        try w.print("{{\"variablesReference\":{}}}", .{var_ref});
+        var args = compat.ArrayList(u8).init(self.allocator);
+        defer args.deinit();
+        try compat.bufPrint(&args, "{{\"variablesReference\":{}}}", .{var_ref});
         return self.send("variables", args.items);
     }
 
     pub fn evaluate(self: *DapClient, expression: []const u8, context: []const u8, frame_id: ?i64) !json.Value {
-        var args = std.ArrayList(u8){};
-        defer args.deinit(self.allocator);
-        var w = args.writer(self.allocator);
-        try w.writeAll("{\"expression\":\"");
-        try write_json_string(w, expression);
-        try w.writeAll("\",\"context\":\"");
-        try write_json_string(w, context);
-        try w.writeAll("\"");
+        var args = compat.ArrayList(u8).init(self.allocator);
+        defer args.deinit();
+        try args.appendSlice("{\"expression\":\"");
+        try write_json_string(ManagedWriter{ .buf = &args }, expression);
+        try args.appendSlice("\",\"context\":\"");
+        try write_json_string(ManagedWriter{ .buf = &args }, context);
+        try args.appendSlice("\"");
         if (frame_id) |fid| {
-            try w.writeAll(",\"frameId\":");
-            try w.print("{}", .{fid});
+            try args.appendSlice(",\"frameId\":");
+            try compat.bufPrint(&args, "{}", .{fid});
         }
-        try w.writeAll("}");
+        try args.appendSlice("}");
         return self.send("evaluate", args.items);
     }
 
     // ── Low-level protocol ────────────────────────────────────────
 
-    fn discover_port(_: *DapClient, pid: u32) !u16 {
+    fn discover_port(self: *DapClient, pid: u32) !u16 {
         var elapsed: u64 = 0;
         while (elapsed < dap_timeout_ms) {
-            std.Thread.sleep(poll_ms * std.time.ns_per_ms);
+            std.Io.sleep(self.io, .{ .nanoseconds = poll_ms * std.time.ns_per_ms }, .awake) catch {};
             elapsed += poll_ms;
             if (find_port_for_pid(pid)) |port| return port else |_| continue;
         }
@@ -342,64 +348,67 @@ pub const DapClient = struct {
         self.seq += 1;
         const conn = self.conn orelse return error.NotConnected;
 
-        var body = std.ArrayList(u8){};
-        defer body.deinit(self.allocator);
-        var bw = body.writer(self.allocator);
-        try bw.writeAll("{\"seq\":");
-        try bw.print("{}", .{seq});
-        try bw.writeAll(",\"type\":\"request\",\"command\":\"");
-        try write_json_string(bw, command);
-        try bw.writeAll("\"");
+        var body = compat.ArrayList(u8).init(self.allocator);
+        defer body.deinit();
+        try body.appendSlice("{\"seq\":");
+        try compat.bufPrint(&body, "{}", .{seq});
+        try body.appendSlice(",\"type\":\"request\",\"command\":\"");
+        try write_json_string(ManagedWriter{ .buf = &body }, command);
+        try body.appendSlice("\"");
         if (args_msg) |a| {
-            try bw.writeAll(",\"arguments\":");
-            try bw.writeAll(a);
+            try body.appendSlice(",\"arguments\":");
+            try body.appendSlice(a);
         }
-        try bw.writeAll("}");
+        try body.appendSlice("}");
 
-        var frame = std.ArrayList(u8){};
-        defer frame.deinit(self.allocator);
-        const fw = frame.writer(self.allocator);
-        try write_frame_content(fw, body.items);
-        try conn.writeAll(frame.items);
+        var frame = compat.ArrayList(u8).init(self.allocator);
+        defer frame.deinit();
+        try write_frame_content(&frame, body.items);
+
+        var wbuf: [4096]u8 = undefined;
+        var writer = conn.writer(self.io, &wbuf);
+        try writer.interface.writeAll(frame.items);
 
         return self.read_response(seq);
     }
 
     fn write_frame(self: *DapClient, command: []const u8, seq: i64, args_msg: ?[]const u8) !void {
         const conn = self.conn orelse return error.NotConnected;
-        var body = std.ArrayList(u8){};
-        defer body.deinit(self.allocator);
-        var bw = body.writer(self.allocator);
-        try bw.writeAll("{\"seq\":");
-        try bw.print("{}", .{seq});
-        try bw.writeAll(",\"type\":\"request\",\"command\":\"");
-        try write_json_string(bw, command);
-        try bw.writeAll("\"");
+        var body = compat.ArrayList(u8).init(self.allocator);
+        defer body.deinit();
+        try body.appendSlice("{\"seq\":");
+        try compat.bufPrint(&body, "{}", .{seq});
+        try body.appendSlice(",\"type\":\"request\",\"command\":\"");
+        try write_json_string(ManagedWriter{ .buf = &body }, command);
+        try body.appendSlice("\"");
         if (args_msg) |a| {
-            try bw.writeAll(",\"arguments\":");
-            try bw.writeAll(a);
+            try body.appendSlice(",\"arguments\":");
+            try body.appendSlice(a);
         }
-        try bw.writeAll("}");
+        try body.appendSlice("}");
 
-        var frame = std.ArrayList(u8){};
-        defer frame.deinit(self.allocator);
-        const fw = frame.writer(self.allocator);
-        try write_frame_content(fw, body.items);
-        try conn.writeAll(frame.items);
+        var frame = compat.ArrayList(u8).init(self.allocator);
+        defer frame.deinit();
+        try write_frame_content(&frame, body.items);
+
+        var wbuf: [4096]u8 = undefined;
+        var writer = conn.writer(self.io, &wbuf);
+        try writer.interface.writeAll(frame.items);
     }
 
-    fn write_frame_content(fw: anytype, body: []const u8) !void {
-        try fw.writeAll("Content-Length: ");
-        try fw.print("{}", .{body.len});
-        try fw.writeAll("\r\n\r\n");
-        try fw.writeAll(body);
+    fn write_frame_content(fw: *compat.ArrayList(u8), body: []const u8) !void {
+        try fw.appendSlice("Content-Length: ");
+        try compat.bufPrint(fw, "{}", .{body.len});
+        try fw.appendSlice("\r\n\r\n");
+        try fw.appendSlice(body);
     }
 
     fn read_response(self: *DapClient, expected_seq: i64) !json.Value {
-        const start = std.time.milliTimestamp();
+        const start = std.Io.Clock.Timestamp.now(self.io, .awake);
         while (true) {
-            const elapsed = @as(u64, @intCast(std.time.milliTimestamp() - start));
-            if (elapsed > dap_timeout_ms) return error.Timeout;
+            const now = std.Io.Clock.Timestamp.now(self.io, .awake);
+            const elapsed = start.durationTo(now).raw.nanoseconds;
+            if (elapsed > dap_timeout_ms * std.time.ns_per_ms) return error.Timeout;
 
             if (self.try_parse_message()) |msg| {
                 const root = msg.object;
@@ -424,7 +433,6 @@ pub const DapClient = struct {
                         return read_err;
                     };
                 },
-                else => return err,
             }
         }
     }
@@ -444,27 +452,28 @@ pub const DapClient = struct {
         }
 
         const stop_timeout_ns: u64 = 30_000_000_000;
-        var timer = std.time.Timer.start() catch return error.Timeout;
+        const start = std.Io.Clock.Timestamp.now(self.io, .awake);
         while (true) {
-            if (timer.read() > stop_timeout_ns) return error.Timeout;
+            const now = std.Io.Clock.Timestamp.now(self.io, .awake);
+            if (start.durationTo(now).raw.nanoseconds > stop_timeout_ns) return error.Timeout;
 
             const msg = self.try_parse_message() catch |err| {
                 if (err == error.NeedMoreData) {
                     const prev_len = self.read_buf.items.len;
                     self.read_more() catch |read_err| {
                         if (read_err == error.Timeout) {
-                            std.Thread.sleep(10 * std.time.ns_per_ms);
+                            std.Io.sleep(self.io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch {};
                             continue;
                         }
                         return read_err;
                     };
                     if (self.read_buf.items.len == prev_len) {
-                        std.Thread.sleep(10 * std.time.ns_per_ms);
+                        std.Io.sleep(self.io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch {};
                     }
                     continue;
                 }
                 if (err == error.ProtocolError) {
-                    self.read_buf.clearAndFree(self.allocator);
+                    self.read_buf.clearAndFree();
                     continue;
                 }
                 return err;
@@ -491,7 +500,7 @@ pub const DapClient = struct {
             }
 
             if (!std.mem.eql(u8, event_val.string, "stopped")) {
-                std.Thread.sleep(10 * std.time.ns_per_ms);
+                std.Io.sleep(self.io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch {};
                 continue;
             }
 
@@ -515,11 +524,11 @@ pub const DapClient = struct {
 
     fn process_pending_events(self: *DapClient) !void {
         _ = self.read_more() catch {};
-        var keep = std.ArrayList(u8){};
+        var keep = compat.ArrayList(u8).init(self.allocator);
         var temp_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer {
             temp_arena.deinit();
-            keep.deinit(self.allocator);
+            keep.deinit();
         }
         var data = self.read_buf.items;
         while (true) {
@@ -536,7 +545,7 @@ pub const DapClient = struct {
             const parsed = json.parseFromSliceLeaky(json.Value, temp_arena.allocator(), body_slice, .{}) catch break;
             const is_response = parsed.object.get("request_seq") != null;
             if (is_response) {
-                keep.appendSlice(self.allocator, data[0..total]) catch break;
+                keep.appendSlice(data[0..total]) catch break;
             } else {
                 self.capture_stopped_thread_id(parsed, false);
             }
@@ -545,8 +554,8 @@ pub const DapClient = struct {
         const remaining = try self.allocator.dupe(u8, data);
         defer self.allocator.free(remaining);
         self.read_buf.clearRetainingCapacity();
-        try self.read_buf.appendSlice(self.allocator, keep.items);
-        try self.read_buf.appendSlice(self.allocator, remaining);
+        try self.read_buf.appendSlice(keep.items);
+        try self.read_buf.appendSlice(remaining);
     }
 
     fn capture_stopped_thread_id(self: *DapClient, msg: json.Value, set_pending: bool) void {
@@ -615,7 +624,7 @@ pub const DapClient = struct {
         self.parse_arena = std.heap.ArenaAllocator.init(self.allocator);
         const parsed = json.parseFromSliceLeaky(json.Value, self.parse_arena.allocator(), body, .{}) catch return error.ProtocolError;
 
-        self.read_buf.replaceRange(self.allocator, 0, total, &.{}) catch |e| {
+        self.read_buf.replaceRange(0, total, &.{}) catch |e| {
             self.logger.fmt(.err, "replaceRange failed: {s}", .{@errorName(e)});
             return error.ProtocolError;
         };
@@ -623,7 +632,7 @@ pub const DapClient = struct {
     }
 
     fn read_more(self: *DapClient) !void {
-        const handle = (self.conn orelse return error.NotConnected).handle;
+        const handle = (self.conn orelse return error.NotConnected).socket.handle;
         var poll_fds = [_]std.posix.pollfd{
             .{ .fd = handle, .events = std.posix.POLL.IN, .revents = 0 },
         };
@@ -634,12 +643,12 @@ pub const DapClient = struct {
         if (poll_fds[0].revents & std.posix.POLL.IN != 0) {
             var buf: [4096]u8 = undefined;
             const conn = &(self.conn orelse return error.NotConnected);
-            const n = conn.read(&buf) catch |err| {
+            const n = std.posix.read(conn.socket.handle, &buf) catch |err| {
                 if (err == error.WouldBlock) return error.Timeout;
                 return err;
             };
             if (n == 0) return error.ConnectionClosed;
-            try self.read_buf.appendSlice(self.allocator, buf[0..n]);
+            try self.read_buf.appendSlice(buf[0..n]);
         } else if (poll_fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL) != 0) {
             return error.ConnectionClosed;
         }

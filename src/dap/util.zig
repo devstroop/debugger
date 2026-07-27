@@ -4,11 +4,11 @@ const builtin = @import("builtin");
 pub const types = @import("types.zig");
 
 pub fn stopped_info_to_json(info: types.StoppedInfo, allocator: std.mem.Allocator) !json.Value {
-    var obj = json.ObjectMap.init(allocator);
-    try obj.put("reason", json.Value{ .string = try allocator.dupe(u8, info.reason) });
-    try obj.put("threadId", json.Value{ .integer = info.thread_id });
+    var obj = try json.ObjectMap.init(allocator, &.{}, &.{});
+    try obj.put(allocator, "reason", json.Value{ .string = try allocator.dupe(u8, info.reason) });
+    try obj.put(allocator, "threadId", json.Value{ .integer = info.thread_id });
     if (info.description) |d| {
-        try obj.put("description", json.Value{ .string = try allocator.dupe(u8, d) });
+        try obj.put(allocator, "description", json.Value{ .string = try allocator.dupe(u8, d) });
     }
     return json.Value{ .object = obj };
 }
@@ -22,8 +22,8 @@ pub fn find_port_for_pid(pid: u32) !u16 {
     else
         &.{ "ss", "-tlnp" };
 
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
+    const io = std.Options.debug_io;
+    const result = std.process.run(allocator, io, .{
         .argv = argv,
     }) catch {
         if (comptime builtin.target.os.tag == .macos) return error.LsofFailed;
