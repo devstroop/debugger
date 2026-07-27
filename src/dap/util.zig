@@ -1,10 +1,11 @@
 const std = @import("std");
 const json = std.json;
 const builtin = @import("builtin");
+const compat = @import("../compat.zig");
 pub const types = @import("types.zig");
 
 pub fn stopped_info_to_json(info: types.StoppedInfo, allocator: std.mem.Allocator) !json.Value {
-    var obj = try json.ObjectMap.init(allocator, &.{}, &.{});
+    var obj = try compat.jsonObjectMap(allocator);
     try obj.put(allocator, "reason", json.Value{ .string = try allocator.dupe(u8, info.reason) });
     try obj.put(allocator, "threadId", json.Value{ .integer = info.thread_id });
     if (info.description) |d| {

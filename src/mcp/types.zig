@@ -1,5 +1,6 @@
 const std = @import("std");
 const json = std.json;
+const compat = @import("../compat.zig");
 
 pub const SessionState = struct {
     active: bool = false,
@@ -15,7 +16,7 @@ pub fn text_content(text: []const u8) json.Value {
 fn build_text_content(allocator: std.mem.Allocator, text: []const u8) !json.Value {
     const owned = try allocator.dupe(u8, text);
     var arr = json.Array.init(allocator);
-    var item = try json.ObjectMap.init(allocator, &.{}, &.{});
+    var item = try compat.jsonObjectMap(allocator);
     try item.put(allocator, "type", json.Value{ .string = "text" });
     try item.put(allocator, "text", json.Value{ .string = owned });
     try arr.append(json.Value{ .object = item });
@@ -35,14 +36,14 @@ fn add_state_to_result(result: *json.ObjectMap, allocator: std.mem.Allocator, st
 }
 
 pub fn text_result(allocator: std.mem.Allocator, text: []const u8) !json.Value {
-    var result = try json.ObjectMap.init(allocator, &.{}, &.{});
+    var result = try compat.jsonObjectMap(allocator);
     try result.put(allocator, "content", try build_text_content(allocator, text));
     try result.put(allocator, "isError", json.Value{ .bool = false });
     return json.Value{ .object = result };
 }
 
 pub fn text_result_with_state(allocator: std.mem.Allocator, text: []const u8, state: ?SessionState) !json.Value {
-    var result = try json.ObjectMap.init(allocator, &.{}, &.{});
+    var result = try compat.jsonObjectMap(allocator);
     try result.put(allocator, "content", try build_text_content(allocator, text));
     try result.put(allocator, "isError", json.Value{ .bool = false });
     try add_state_to_result(&result, allocator, state);
@@ -50,7 +51,7 @@ pub fn text_result_with_state(allocator: std.mem.Allocator, text: []const u8, st
 }
 
 pub fn error_result(allocator: std.mem.Allocator, message: []const u8) !json.Value {
-    var result = try json.ObjectMap.init(allocator, &.{}, &.{});
+    var result = try compat.jsonObjectMap(allocator);
     try result.put(allocator, "content", try build_text_content(allocator, message));
     try result.put(allocator, "isError", json.Value{ .bool = true });
     return json.Value{ .object = result };

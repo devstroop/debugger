@@ -1,79 +1,75 @@
 const std = @import("std");
 const json = std.json;
 const util = @import("../dap/util.zig");
+const compat = @import("../compat.zig");
+
+const TestWriter = struct {
+    buf: *compat.ArrayList(u8),
+    pub fn writeAll(self: TestWriter, data: []const u8) !void { try self.buf.appendSlice(data); }
+    pub fn writeByte(self: TestWriter, byte: u8) !void { try self.buf.append(byte); }
+    pub fn print(self: TestWriter, comptime fmt: []const u8, args: anytype) !void {
+        try compat.bufPrint(self.buf, fmt, args);
+    }
+};
+
+fn testWriteJsonString(input: []const u8, expected: []const u8) !void {
+    var buf = compat.ArrayList(u8).init(std.testing.allocator);
+    defer buf.deinit();
+    try util.write_json_string(TestWriter{ .buf = &buf }, input);
+    try std.testing.expectEqualStrings(expected, buf.items);
+}
 
 test "write_json_string escapes special characters" {
-    var buf = std.ArrayList(u8){};
-    defer buf.deinit(std.testing.allocator);
-    const w = buf.writer(std.testing.allocator);
-
-    try util.write_json_string(w, "hello \"world\"\nline2");
-    try std.testing.expectEqualStrings("hello \\\"world\\\"\\nline2", buf.items);
+    try testWriteJsonString("hello \"world\"\nline2", "hello \\\"world\\\"\\nline2");
 }
 
 test "write_json_string escapes backslash" {
-    var buf = std.ArrayList(u8){};
-    defer buf.deinit(std.testing.allocator);
-    const w = buf.writer(std.testing.allocator);
-
-    try util.write_json_string(w, "a\\b");
-    try std.testing.expectEqualStrings("a\\\\b", buf.items);
+    try testWriteJsonString("a\\b", "a\\\\b");
 }
 
 test "write_json_string handles plain text unchanged" {
-    var buf = std.ArrayList(u8){};
-    defer buf.deinit(std.testing.allocator);
-    const w = buf.writer(std.testing.allocator);
-
-    try util.write_json_string(w, "plain_text_123");
-    try std.testing.expectEqualStrings("plain_text_123", buf.items);
+    try testWriteJsonString("plain_text_123", "plain_text_123");
 }
 
 test "write_json_string handles empty string" {
-    var buf = std.ArrayList(u8){};
-    defer buf.deinit(std.testing.allocator);
-    const w = buf.writer(std.testing.allocator);
-
-    try util.write_json_string(w, "");
-    try std.testing.expectEqualStrings("", buf.items);
+    try testWriteJsonString("", "");
 }
 
 test "write_json_string escapes control characters" {
-    var buf = std.ArrayList(u8){};
-    defer buf.deinit(std.testing.allocator);
-    const w = buf.writer(std.testing.allocator);
-
-    try util.write_json_string(w, "\x00\x01\x1f");
-    try std.testing.expectEqualStrings("\\u0000\\u0001\\u001f", buf.items);
+    try testWriteJsonString("\x00\x01\x1f", "\\u0000\\u0001\\u001f");
 }
 
 test "write_json_string escapes tab and carriage return" {
-    var buf = std.ArrayList(u8){};
-    defer buf.deinit(std.testing.allocator);
-    const w = buf.writer(std.testing.allocator);
+    try testWriteJsonString("a\tb\rc", "a\\tb\\rc");
+}
 
-    try util.write_json_string(w, "a\tb\rc");
-    try std.testing.expectEqualStrings("a\\tb\\rc", buf.items);
+fn makeObj() !json.ObjectMap {
+    return try compat.jsonObjectMap(std.testing.allocator);
+}
+
+fn putObj(obj: *json.ObjectMap, key: []const u8, val: json.Value) !void {
+    try obj.put(std.testing.allocator, key, val);
 }
 
 test "check_success passes on success:true" {
-    var obj = json.ObjectMap.init(std.testing.allocator);
-    defer obj.deinit();
-    try obj.put("success", json.Value{ .bool = true });
+    var obj = try makeObj();
+    defer obj.deinit(std.testing.allocator);
+    try putObj(&obj, "success", json.Value{ .bool = true });
     const val = json.Value{ .object = obj };
     try util.check_success(val);
 }
 
 test "check_success returns error on success:false" {
-    var obj = json.ObjectMap.init(std.testing.allocator);
-    defer obj.deinit();
-    try obj.put("success", json.Value{ .bool = false });
+    var obj = try makeObj();
+    defer obj.deinit(std.testing.allocator);
+    try putObj(&obj, "success", json.Value{ .bool = false });
     const val = json.Value{ .object = obj };
     try std.testing.expectError(error.DapRequestFailed, util.check_success(val));
 }
 
 test "check_success passes on missing success field" {
-    const obj = json.ObjectMap.init(std.testing.allocator);
+    var obj = try compat.jsonObjectMap(std.testing.allocator);
+    defer obj.deinit(std.testing.allocator);
     const val = json.Value{ .object = obj };
     try util.check_success(val);
 }
@@ -99,8 +95,7 @@ test "json_to_i64 with other type defaults to 0" {
 }
 
 test "json_to_i64 with null defaults to 0" {
-    // Use explicit null-check path: non-numeric types return 0
-    const val = json.Value{ .bool = true }; // bool isn't numeric
+    const val = json.Value{ .bool = true };
     try std.testing.expectEqual(@as(i64, 0), util.json_to_i64(val));
 }
 
@@ -143,7 +138,7 @@ test "stopped_info_to_json handles empty reason and large threadId" {
 
     const info = util.types.StoppedInfo{
         .reason = "",
-        .thread_id = 9223372036854775807, // max i64
+        .thread_id = 9223372036854775807,
         .description = null,
     };
     const result = try util.stopped_info_to_json(info, alloc);

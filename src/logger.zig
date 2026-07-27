@@ -1,8 +1,9 @@
 const std = @import("std");
 
 fn writeToStderr(msg: []const u8) void {
-    var buf: [1024]u8 = undefined;
-    const stderr_lock = std.debug.lockStderr(&buf);
+    const buf = std.heap.page_allocator.alloc(u8, 4096) catch return;
+    defer std.heap.page_allocator.free(buf);
+    const stderr_lock = std.debug.lockStderr(buf);
     defer std.debug.unlockStderr();
     stderr_lock.file_writer.interface.writeAll(msg) catch {};
 }

@@ -15,11 +15,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/setup-zig
-          key: zig-0.15.2-${{ runner.os }}
+          key: zig-0.16.0-${{ runner.os }}
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
           cache: true
       - name: zig build
         run: zig build
@@ -35,11 +35,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/setup-zig
-          key: zig-0.15.2-${{ runner.os }}
+          key: zig-0.16.0-${{ runner.os }}
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
           cache: true
       - name: zig build
         run: zig build
