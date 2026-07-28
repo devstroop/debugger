@@ -67,8 +67,20 @@ pub const DapClient = struct {
     pub fn connect(self: *DapClient) !void {
         self.logger.info("Spawning adapter...");
 
+        // Load the system environment via the general-purpose allocator so
+        // the FixedBufferAllocator backing debug_io doesn't OOM when copying
+        // a large environment during process spawn.
+        // If getEnvMap fails, fall back to an empty env — the spawn will
+        // proceed without any environment variables.
+        var env_map = std.process.getEnvMap(self.allocator) catch |err| blk: {
+            self.logger.fmt(.warn, "getEnvMap failed: {}, spawning with empty env", .{err});
+            break :blk std.process.Environ.Map.init(self.allocator);
+        };
+        defer env_map.deinit();
+
         var child = try std.process.spawn(self.io, .{
             .argv = &.{ self.adapter_path, "--port", "0" },
+            .env_map = &env_map,
             .stdin = .ignore,
             .stdout = .ignore,
             .stderr = .pipe,

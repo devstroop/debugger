@@ -23,13 +23,20 @@ pub fn find_port_for_pid(pid: u32) !u16 {
     else
         &.{ "ss", "-tlnp" };
 
+    // Load the system environment so debug_io's FixedBufferAllocator doesn't
+    // OOM on a large environment during the subprocess spawn.
+    // If getEnvMap fails, fall back to an empty env (the subprocess will lack
+    // the inherited environment, but will still be functional).
+    var env_map = std.process.getEnvMap(allocator) catch blk: {
+        break :blk std.process.Environ.Map.init(allocator);
+    };
+    defer env_map.deinit();
+
     const io = std.Options.debug_io;
     const result = std.process.run(allocator, io, .{
         .argv = argv,
-    }) catch {
-        if (comptime builtin.target.os.tag == .macos) return error.LsofFailed;
-        return error.SsFailed;
-    };
+        .env_map = &env_map,
+    }) catch |err| return err;
     defer {
         allocator.free(result.stdout);
         allocator.free(result.stderr);
