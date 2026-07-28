@@ -15,8 +15,11 @@ var global_threaded: std.Io.Threaded = .init_single_threaded;
 pub const std_options_debug_threaded_io: ?*std.Io.Threaded = &global_threaded;
 
 pub fn main() !void {
-    // Use a bounded backing buffer so threaded I/O init won't exhaust memory.
-    var io_backing: [128 * 1024]u8 = undefined;
+// Use a bounded backing buffer so threaded I/O init won't exhaust memory.
+    // The env_map is now loaded separately (see client.zig connect()), so this
+    // only covers per-spawn overhead (argv, pipes, internal structures) — < 1KB.
+    // 256KB provides a generous margin for concurrent spawns.
+    var io_backing: [256 * 1024]u8 = undefined;
     var io_fba = std.heap.FixedBufferAllocator.init(&io_backing);
 
     // Upgrade the global I/O to threaded BEFORE any debug_io access.
