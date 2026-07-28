@@ -31,5 +31,5 @@ main
 build/
 
 # Local development files
-review.md
-issues.md
+REVIEW.md
+ISSUES.md
