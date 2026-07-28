@@ -26,10 +26,7 @@ pub fn find_port_for_pid(pid: u32) !u16 {
     const io = std.Options.debug_io;
     const result = std.process.run(allocator, io, .{
         .argv = argv,
-    }) catch {
-        if (comptime builtin.target.os.tag == .macos) return error.LsofFailed;
-        return error.SsFailed;
-    };
+    }) catch |err| return err;
     defer {
         allocator.free(result.stdout);
         allocator.free(result.stderr);
