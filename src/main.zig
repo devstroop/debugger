@@ -58,7 +58,7 @@ pub fn main() !void {
         // If $PATH lookup failed, check well-known installation
         // locations.  We verify executability so we don't select a
         // directory or corrupted file that would fail at spawn time.
-        const candidates = &.{
+        const candidates = [_][]const u8{
             "/usr/lib/llvm-19/bin/lldb-dap",
             "/usr/lib/llvm-18/bin/lldb-dap",
             "/usr/lib/llvm-17/bin/lldb-dap",
@@ -72,16 +72,17 @@ pub fn main() !void {
         for (candidates) |path| {
             if (std.fs.accessAbsolute(path, .{ .execute = true })) |_| {
                 break :blk try allocator.dupe(u8, path);
-            } else |err| switch (err) {
-                error.FileNotFound => {},
-                else => logger.warn("accessAbsolute({s}) failed: {}", .{ path, err }),
+            } else |err| {
+                if (err != error.FileNotFound) {
+                    logger.fmt(.warn, "accessAbsolute({s}) failed: {}", .{ path, err });
+                }
             }
         }
 
         // Last resort: let the kernel resolve the name via $PATH.
         // This works when lldb-dap is installed but not at any of the
         // well-known paths above.
-        logger.warn("lldb-dap not found via PATH or well-known paths; falling back to bare name", .{});
+        logger.warn("lldb-dap not found via PATH or well-known paths; falling back to bare name");
         break :blk try allocator.dupe(u8, "lldb-dap");
     };
 
