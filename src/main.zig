@@ -50,36 +50,7 @@ pub fn main() !void {
         if (val) |v| {
             break :blk try allocator.dupe(u8, v);
         }
-
-        // Check well-known installation locations first.
-        // If none exist we'll fall back to a bare name that the kernel
-        // resolves via $PATH at spawn time.
-
-        // If $PATH lookup failed, check well-known installation
-        // locations.  We verify executability so we don't select a
-        // directory or corrupted file that would fail at spawn time.
-        const candidates = [_][]const u8{
-            "/usr/lib/llvm-19/bin/lldb-dap",
-            "/usr/lib/llvm-18/bin/lldb-dap",
-            "/usr/lib/llvm-17/bin/lldb-dap",
-            "/usr/bin/lldb-dap",
-            "/usr/local/bin/lldb-dap",
-            // Homebrew on macOS (Apple Silicon)
-            "/opt/homebrew/bin/lldb-dap",
-            // Homebrew on macOS (Intel)
-            "/usr/local/opt/llvm/bin/lldb-dap",
-        };
-        for (candidates) |path| {
-            if (std.fs.openFileAbsolute(path, .{})) |file| {
-                file.close();
-                break :blk try allocator.dupe(u8, path);
-            } else |_| continue;
-        }
-
-        // Last resort: let the kernel resolve the name via $PATH.
-        // This works when lldb-dap is installed but not at any of the
-        // well-known paths above.
-        logger.warn("lldb-dap not found via PATH or well-known paths; falling back to bare name");
+        logger.warn("lldb-dap not found via env; falling back to PATH lookup");
         break :blk try allocator.dupe(u8, "lldb-dap");
     };
 
