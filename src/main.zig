@@ -3,13 +3,34 @@ const mcp_server = @import("mcp/server.zig");
 const handler_mod = @import("mcp/handler.zig");
 const log_mod = @import("logger.zig");
 
+// Provide a properly-initialized Threaded Io for process spawning.
+// The default debug_io uses Allocator.failing which can't spawn processes.
+// We initialise with .init_single_threaded at module scope so the pointer
+// exposed via std_options_debug_threaded_io is always valid (comptime
+// constants cannot point to undefined memory).  No imported module
+// accesses debug_io at comptime or during declaration evaluation — all
+// access happens inside function bodies (logger, process spawning) that
+// run after main() has upgraded the global to threaded I/O.
+var global_threaded: std.Io.Threaded = .init_single_threaded;
+pub const std_options_debug_threaded_io: ?*std.Io.Threaded = &global_threaded;
+
 pub fn main() !void {
+    // Use a bounded backing buffer so threaded I/O init won't exhaust memory.
+    var io_backing: [128 * 1024]u8 = undefined;
+    var io_fba = std.heap.FixedBufferAllocator.init(&io_backing);
+
+    // Upgrade the global I/O to threaded BEFORE any debug_io access.
+    global_threaded = std.Io.Threaded.init(io_fba.allocator(), .{
+        .concurrent_limit = .{ .max = 4 },
+        .async_limit = .{ .max = 8 },
+    });
+
+    const allocator = std.heap.smp_allocator;
+
     var start_buf: [64]u8 = undefined;
     const start_stderr = std.debug.lockStderr(&start_buf);
     defer std.debug.unlockStderr();
     start_stderr.file_writer.interface.writeAll("debugger: starting\n") catch {};
-
-    const allocator = std.heap.smp_allocator;
 
     var logger = log_mod.Logger.init();
     {
@@ -26,7 +47,49 @@ pub fn main() !void {
         var env_map = std.process.Environ.Map.init(allocator);
         defer env_map.deinit();
         const val = env_map.get("DEBUGGERMCP_ADAPTER");
-        break :blk if (val) |v| try allocator.dupe(u8, v) else "/tmp/codelldb-extract/extension/adapter/codelldb";
+        if (val) |v| {
+            break :blk try allocator.dupe(u8, v);
+        }
+
+        // Before falling back to hardcoded paths, try looking up
+        // `lldb-dap` via $PATH — this covers user-installed tools,
+        // conda environments, Nix, Snap, and custom prefixes.
+        // findProgramAbsolute already verifies executability.
+        if (std.process.getEnvMap(allocator)) |system_env| {
+            defer system_env.deinit();
+            if (std.process.findProgramAbsolute("lldb-dap", &system_env)) |found| {
+                break :blk try allocator.dupe(u8, found);
+            } else |_| {}
+        } else |_| {}
+
+        // If $PATH lookup failed, check well-known installation
+        // locations.  We verify executability so we don't select a
+        // directory or corrupted file that would fail at spawn time.
+        const candidates = &.{
+            "/usr/lib/llvm-19/bin/lldb-dap",
+            "/usr/lib/llvm-18/bin/lldb-dap",
+            "/usr/lib/llvm-17/bin/lldb-dap",
+            "/usr/bin/lldb-dap",
+            "/usr/local/bin/lldb-dap",
+            // Homebrew on macOS (Apple Silicon)
+            "/opt/homebrew/bin/lldb-dap",
+            // Homebrew on macOS (Intel)
+            "/usr/local/opt/llvm/bin/lldb-dap",
+        };
+        for (candidates) |path| {
+            if (std.fs.accessAbsolute(path, .{ .execute = true })) |_| {
+                break :blk try allocator.dupe(u8, path);
+            } else |err| switch (err) {
+                error.FileNotFound => {},
+                else => logger.warn("accessAbsolute({s}) failed: {}", .{ path, err }),
+            }
+        }
+
+        // Last resort: let the kernel resolve the name via $PATH.
+        // This works when lldb-dap is installed but not at any of the
+        // well-known paths above.
+        logger.warn("lldb-dap not found via PATH or well-known paths; falling back to bare name", .{});
+        break :blk try allocator.dupe(u8, "lldb-dap");
     };
 
     var handler = handler_mod.Handler.init(allocator, &logger, adapter_path);
