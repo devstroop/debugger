@@ -51,13 +51,9 @@ pub fn main() !void {
             break :blk try allocator.dupe(u8, v);
         }
 
-        // Before falling back to hardcoded paths, try looking up
-        // `lldb-dap` via $PATH — this covers user-installed tools,
-        // conda environments, Nix, Snap, and custom prefixes.
-        // findProgramAbsolute already verifies executability.
-        if (std.process.findProgramAbsolute("lldb-dap", &.{})) |found| {
-            break :blk try allocator.dupe(u8, found);
-        } else |_| {}
+        // Check well-known installation locations first.
+        // If none exist we'll fall back to a bare name that the kernel
+        // resolves via $PATH at spawn time.
 
         // If $PATH lookup failed, check well-known installation
         // locations.  We verify executability so we don't select a
