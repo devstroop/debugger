@@ -55,11 +55,8 @@ pub fn main() !void {
         // `lldb-dap` via $PATH — this covers user-installed tools,
         // conda environments, Nix, Snap, and custom prefixes.
         // findProgramAbsolute already verifies executability.
-        if (std.process.getEnvMap(allocator)) |system_env| {
-            defer system_env.deinit();
-            if (std.process.findProgramAbsolute("lldb-dap", &system_env)) |found| {
-                break :blk try allocator.dupe(u8, found);
-            } else |_| {}
+        if (std.process.findProgramAbsolute("lldb-dap", &.{})) |found| {
+            break :blk try allocator.dupe(u8, found);
         } else |_| {}
 
         // If $PATH lookup failed, check well-known installation
