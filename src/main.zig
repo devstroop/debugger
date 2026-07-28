@@ -21,8 +21,8 @@ pub fn main() !void {
 
     // Upgrade the global I/O to threaded BEFORE any debug_io access.
     global_threaded = std.Io.Threaded.init(io_fba.allocator(), .{
-        .concurrent_limit = .{ .max = 4 },
-        .async_limit = .{ .max = 8 },
+        .concurrent_limit = .nothing,
+        .async_limit = .nothing,
     });
 
     const allocator = std.heap.smp_allocator;
