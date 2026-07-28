@@ -70,13 +70,10 @@ pub fn main() !void {
             "/usr/local/opt/llvm/bin/lldb-dap",
         };
         for (candidates) |path| {
-            if (std.fs.accessAbsolute(path, .{ .execute = true })) |_| {
+            if (std.fs.openFileAbsolute(path, .{})) |file| {
+                file.close();
                 break :blk try allocator.dupe(u8, path);
-            } else |err| {
-                if (err != error.FileNotFound) {
-                    logger.fmt(.warn, "accessAbsolute({s}) failed: {}", .{ path, err });
-                }
-            }
+            } else |_| continue;
         }
 
         // Last resort: let the kernel resolve the name via $PATH.
