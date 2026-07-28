@@ -3,13 +3,34 @@ const mcp_server = @import("mcp/server.zig");
 const handler_mod = @import("mcp/handler.zig");
 const log_mod = @import("logger.zig");
 
+// Provide a properly-initialized Threaded Io for process spawning.
+// The default debug_io uses Allocator.failing which can't spawn processes.
+// We initialise with .init_single_threaded at module scope so the pointer
+// exposed via std_options_debug_threaded_io is always valid (comptime
+// constants cannot point to undefined memory).  No imported module
+// accesses debug_io at comptime or during declaration evaluation — all
+// access happens inside function bodies (logger, process spawning) that
+// run after main() has upgraded the global to threaded I/O.
+var global_threaded: std.Io.Threaded = .init_single_threaded;
+pub const std_options_debug_threaded_io: ?*std.Io.Threaded = &global_threaded;
+
 pub fn main() !void {
+    // Use a bounded backing buffer so threaded I/O init won't exhaust memory.
+    var io_backing: [128 * 1024]u8 = undefined;
+    var io_fba = std.heap.FixedBufferAllocator.init(&io_backing);
+
+    // Upgrade the global I/O to threaded BEFORE any debug_io access.
+    global_threaded = std.Io.Threaded.init(io_fba.allocator(), .{
+        .concurrent_limit = .nothing,
+        .async_limit = .nothing,
+    });
+
+    const allocator = std.heap.smp_allocator;
+
     var start_buf: [64]u8 = undefined;
     const start_stderr = std.debug.lockStderr(&start_buf);
     defer std.debug.unlockStderr();
     start_stderr.file_writer.interface.writeAll("debugger: starting\n") catch {};
-
-    const allocator = std.heap.smp_allocator;
 
     var logger = log_mod.Logger.init();
     {
@@ -26,7 +47,11 @@ pub fn main() !void {
         var env_map = std.process.Environ.Map.init(allocator);
         defer env_map.deinit();
         const val = env_map.get("DEBUGGERMCP_ADAPTER");
-        break :blk if (val) |v| try allocator.dupe(u8, v) else "/tmp/codelldb-extract/extension/adapter/codelldb";
+        if (val) |v| {
+            break :blk try allocator.dupe(u8, v);
+        }
+        logger.warn("lldb-dap not found via env; falling back to PATH lookup");
+        break :blk try allocator.dupe(u8, "lldb-dap");
     };
 
     var handler = handler_mod.Handler.init(allocator, &logger, adapter_path);

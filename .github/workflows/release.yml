@@ -28,10 +28,17 @@ jobs:
         include:
           - name: Linux (x86_64)
             runner: ubuntu-latest
+            target: x86_64-linux-gnu
             artifact: debugger-linux-x86_64
+            archive: tar.gz
+          - name: Linux (aarch64)
+            runner: ubuntu-latest
+            target: aarch64-linux-gnu
+            artifact: debugger-linux-aarch64
             archive: tar.gz
           - name: macOS (arm64)
             runner: macos-15
+            target: aarch64-macos
             artifact: debugger-macos-arm64
             archive: tar.gz
 
@@ -82,12 +89,29 @@ jobs:
       - name: Show toolchain versions
         run: zig version
 
+      - name: Install cross-compilation dependencies (aarch64 Linux)
+        if: contains(matrix.target, 'aarch64') && runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            gcc-aarch64-linux-gnu \
+            libc6-dev-arm64-cross \
+            libstdc++-12-dev-arm64-cross
+
       - name: Run tests
         run: zig build test --release=fast --summary all
 
       - name: Build
         shell: bash
-        run: zig build --release=fast --summary all
+        run: |
+          # Only pass -Dtarget for cross-compilation (aarch64 on x86_64 runner).
+          # Native builds use Zig's default host target.
+          EXTRA=""
+          if [ "${{ matrix.target }}" = "aarch64-linux-gnu" ]; then
+            EXTRA="-Dtarget=${{ matrix.target }}"
+          fi
+          zig build --release=fast --summary all $EXTRA
 
       - name: List build outputs
         shell: bash
