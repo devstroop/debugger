@@ -1,4 +1,4 @@
-# debugger-mcp
+# Debugger MCP
 
 An MCP (Model Context Protocol) server that bridges MCP tool calls to the Debug Adapter Protocol (DAP) via [codelldb](https://github.com/vadimcn/vscode-lldb). Enables LLM-driven debugging of native code (C, C++, Rust, Zig, etc.) through a debugger.
 
